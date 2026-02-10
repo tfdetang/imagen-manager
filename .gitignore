@@ -1,0 +1,78 @@
+# Environment & Secrets
+.env
+*.key
+*.pem
+
+# Google Cookies (contains auth tokens)
+data/cookies.json
+data/cookies.txt
+data/*.json
+data/*.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+.hypothesis/
+
+# Generated Images
+static/generated/*
+!static/generated/.gitkeep
+
+# Debug Screenshots
+/tmp/*.png
+debug_*.png
+
+# Logs
+*.log
+
+# Playwright
+.playwright/
+
+# UV
+.python-version
+uv.lock
+gemini-imagen/cookies.json
