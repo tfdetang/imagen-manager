@@ -171,9 +171,14 @@ class AccountPool:
             if available:
                 available_count += 1
 
+            identity = account.cookie_manager.get_account_identity()
+
             account_items.append(
                 {
                     "account_id": account.account_id,
+                    "email": identity.get("email") or None,
+                    "identity_label": identity.get("label", "unknown"),
+                    "identity_kind": identity.get("kind", "unknown"),
                     "enabled": account.enabled,
                     "active_tasks": account.active_tasks,
                     "in_cooldown": in_cooldown,

@@ -220,6 +220,7 @@
                 <thead>
                     <tr>
                         <th>账号</th>
+                        <th>账号身份</th>
                         <th>状态</th>
                         <th>活跃任务</th>
                         <th>冷却剩余</th>
@@ -227,7 +228,7 @@
                 </thead>
                 <tbody id="accountTableBody">
                     <tr>
-                        <td colspan="4" style="color:#999;">暂无数据</td>
+                        <td colspan="5" style="color:#999;">暂无数据</td>
                     </tr>
                 </tbody>
             </table>
@@ -379,13 +380,14 @@
 
         function updateAccountTable(accounts) {
             if (!accounts || accounts.length === 0) {
-                accountTableBody.innerHTML = '<tr><td colspan="4" style="color:#999;">暂无数据</td></tr>';
+                accountTableBody.innerHTML = '<tr><td colspan="5" style="color:#999;">暂无数据</td></tr>';
                 return;
             }
 
             accountTableBody.innerHTML = accounts.map((account) => `
                 <tr>
                     <td>${account.account_id}</td>
+                    <td>${account.identity_label || account.email || '未识别'}${account.identity_kind ? ` <span style="color:#888;">(${account.identity_kind})</span>` : ''}</td>
                     <td>${renderAccountTag(account)}</td>
                     <td>${account.active_tasks}</td>
                     <td>${account.in_cooldown ? account.cooldown_remaining + 's' : '-'}</td>

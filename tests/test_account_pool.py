@@ -84,3 +84,52 @@ def test_account_pool_add_or_update_account(tmp_path):
     manager.save_cookies([])
 
     assert pool.has_account("b")
+
+
+def test_account_pool_stats_contains_email(tmp_path):
+    """Should expose inferred account email in health stats when present in cookies."""
+    account_a = tmp_path / "a.json"
+    account_a.write_text(
+        """[
+    {
+        "name": "ACCOUNT_CHOOSER",
+        "value": "user=test.user@gmail.com",
+        "domain": ".google.com",
+        "path": "/"
+    }
+]"""
+    )
+
+    pool = AccountPool(
+        [("a", account_a)],
+        per_account_concurrent=1,
+    )
+
+    stats = pool.stats()
+    assert stats["accounts"][0]["email"] == "test.user@gmail.com"
+    assert stats["accounts"][0]["identity_kind"] == "email"
+
+
+def test_account_pool_stats_contains_fingerprint_when_no_email(tmp_path):
+    """Should provide deterministic fingerprint when no readable identity exists."""
+    account_a = tmp_path / "a.json"
+    account_a.write_text(
+        """[
+  {
+        "name": "SID",
+        "value": "abc123opaque",
+        "domain": ".google.com",
+        "path": "/"
+  }
+]"""
+    )
+
+    pool = AccountPool(
+        [("a", account_a)],
+        per_account_concurrent=1,
+    )
+
+    stats = pool.stats()
+    identity_label = stats["accounts"][0]["identity_label"]
+    assert identity_label.startswith("fp-")
+    assert stats["accounts"][0]["identity_kind"] == "fingerprint"

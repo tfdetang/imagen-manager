@@ -77,6 +77,9 @@ class AccountHealth(BaseModel):
     """Per-account runtime status."""
 
     account_id: str
+    email: str | None = None
+    identity_label: str | None = None
+    identity_kind: str | None = None
     enabled: bool
     active_tasks: int
     in_cooldown: bool

@@ -1,5 +1,7 @@
 """Browser and cookie management."""
+import hashlib
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -13,11 +15,41 @@ class CookieManager:
         self.prefer_configured_path = prefer_configured_path
         self._cookies_cache: list[dict[str, Any]] | None = None
         self._last_load_time: float | None = None
+        self._account_email_cache: str | None = None
+        self._account_email_last_load_time: float | None = None
+        self._identity_cache: dict[str, str] | None = None
+        self._identity_last_load_time: float | None = None
 
     def clear_cache(self):
         """Clear the cookies cache to force reload on next access."""
         self._cookies_cache = None
         self._last_load_time = None
+        self._account_email_cache = None
+        self._account_email_last_load_time = None
+        self._identity_cache = None
+        self._identity_last_load_time = None
+
+    def get_account_email(self) -> str | None:
+        """Best-effort extract account email from raw cookies (cached for 5 minutes)."""
+        if self._account_email_last_load_time:
+            if time.time() - self._account_email_last_load_time < 300:
+                return self._account_email_cache
+
+        email = self._extract_email_from_raw_cookies()
+        self._account_email_cache = email
+        self._account_email_last_load_time = time.time()
+        return email
+
+    def get_account_identity(self) -> dict[str, str]:
+        """Return best-effort identity for account display and management."""
+        if self._identity_last_load_time:
+            if time.time() - self._identity_last_load_time < 300 and self._identity_cache:
+                return self._identity_cache
+
+        identity = self._extract_account_identity()
+        self._identity_cache = identity
+        self._identity_last_load_time = time.time()
+        return identity
 
     def save_cookies(self, cookies_data: list[dict]) -> Path:
         """
@@ -126,3 +158,151 @@ class CookieManager:
             playwright_cookies.append(cookie)
 
         return playwright_cookies
+
+    def _extract_email_from_raw_cookies(self) -> str | None:
+        """Try extracting Google account email by scanning cookie payload fields."""
+        raw_cookies = self._load_raw_cookies()
+        if raw_cookies is None:
+            return None
+
+        email_pattern = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+        for item in raw_cookies:
+            if not isinstance(item, dict):
+                continue
+
+            domain = str(item.get("domain", ""))
+            if domain and "google" not in domain and "gmail" not in domain:
+                continue
+
+            for value in item.values():
+                if not isinstance(value, str):
+                    continue
+                match = email_pattern.search(value)
+                if match:
+                    return match.group(0).lower()
+
+        return None
+
+    def _extract_account_identity(self) -> dict[str, str]:
+        """Extract an identity label with fallback strategy from cookies content."""
+        raw_cookies = self._load_raw_cookies()
+        if raw_cookies is None:
+            return {
+                "label": "unknown",
+                "kind": "unknown",
+                "email": "",
+            }
+
+        email_pattern = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+        name_patterns = [
+            re.compile(r'"name"\s*:\s*"([^"@]{2,64})"', re.IGNORECASE),
+            re.compile(r"(?:display_name|displayName|fullname|full_name|profile_name)=([A-Za-z0-9_\-\s]{2,64})", re.IGNORECASE),
+        ]
+        chooser_patterns = [
+            re.compile(r"(?:gaia|account|obfuscated|id)=([A-Za-z0-9._\-]{6,64})", re.IGNORECASE),
+            re.compile(r"\b([0-9]{12,})\b"),
+        ]
+
+        for item in raw_cookies:
+            if not isinstance(item, dict):
+                continue
+            domain = str(item.get("domain", ""))
+            if domain and "google" not in domain and "gmail" not in domain:
+                continue
+            for value in item.values():
+                if not isinstance(value, str):
+                    continue
+                match = email_pattern.search(value)
+                if match:
+                    email = match.group(0).lower()
+                    return {
+                        "label": email,
+                        "kind": "email",
+                        "email": email,
+                    }
+
+        for item in raw_cookies:
+            if not isinstance(item, dict):
+                continue
+            domain = str(item.get("domain", ""))
+            if domain and "google" not in domain and "gmail" not in domain:
+                continue
+            for value in item.values():
+                if not isinstance(value, str):
+                    continue
+                for pattern in name_patterns:
+                    match = pattern.search(value)
+                    if match:
+                        name_value = match.group(1).strip()
+                        if name_value:
+                            return {
+                                "label": name_value,
+                                "kind": "name",
+                                "email": "",
+                            }
+
+        for item in raw_cookies:
+            if not isinstance(item, dict):
+                continue
+            cookie_name = str(item.get("name", "")).upper()
+            if cookie_name not in {"ACCOUNT_CHOOSER", "LSID", "__SECURE-1PSIDTS"}:
+                continue
+            value = str(item.get("value", ""))
+            for pattern in chooser_patterns:
+                match = pattern.search(value)
+                if match:
+                    suffix = match.group(1)
+                    if suffix:
+                        clipped = suffix[-8:] if len(suffix) > 8 else suffix
+                        return {
+                            "label": f"acct-{clipped}",
+                            "kind": "account_hint",
+                            "email": "",
+                        }
+
+        return {
+            "label": self._build_cookie_fingerprint(raw_cookies),
+            "kind": "fingerprint",
+            "email": "",
+        }
+
+    def _build_cookie_fingerprint(self, raw_cookies: list[dict]) -> str:
+        """Build deterministic non-reversible short fingerprint from stable cookie fields."""
+        chunks = []
+        for item in raw_cookies:
+            if not isinstance(item, dict):
+                continue
+            domain = str(item.get("domain", ""))
+            if domain and "google" not in domain and "gmail" not in domain:
+                continue
+            name = str(item.get("name", ""))
+            value = str(item.get("value", ""))
+            if not name or not value:
+                continue
+            digest = hashlib.sha256(f"{name}={value}".encode("utf-8")).hexdigest()[:8]
+            chunks.append(f"{name}:{digest}")
+
+        if not chunks:
+            base = self.cookies_path.name
+            digest = hashlib.sha256(base.encode("utf-8")).hexdigest()[:10]
+            return f"fp-{digest}"
+
+        chunks.sort()
+        merged = "|".join(chunks)
+        digest = hashlib.sha256(merged.encode("utf-8")).hexdigest()[:10]
+        return f"fp-{digest}"
+
+    def _load_raw_cookies(self) -> list[dict] | None:
+        """Load raw cookies JSON list from detected cookies file."""
+        cookies_file = self._find_cookies_file()
+        if not cookies_file:
+            return None
+
+        with open(cookies_file) as f:
+            raw_cookies = json.load(f)
+
+        if not isinstance(raw_cookies, list):
+            return None
+
+        return raw_cookies
