@@ -203,260 +203,66 @@ class ImageGenerator:
         file_size = image_path.stat().st_size
         logger.info(f"  📏 Reference image size: {file_size} bytes")
 
-        # Try to find existing file input
-        logger.info("  🔍 Looking for file input elements...")
-        file_inputs = await page.query_selector_all('input[type="file"]')
-        logger.info(f"  ℹ️  Found {len(file_inputs)} file input(s)")
+        # Primary strategy: Click upload button then "Upload files" menu item
+        upload_button_selectors = [
+            'button[aria-label="Open upload file menu"]',
+            'button[aria-label*="upload" i]',
+        ]
 
-        for i, fi in enumerate(file_inputs):
+        for sel in upload_button_selectors:
             try:
-                accept = await fi.get_attribute("accept")
-                logger.info(f"  📋 Input {i}: accept={accept}")
-                if accept and "image" in accept:
-                    logger.info(f"  ✅ Using file input {i} to upload image")
-                    await fi.set_input_files(str(image_path))
-                    uploaded = True
-                    logger.info("  ⏳ Waiting 3 seconds after upload...")
-                    await asyncio.sleep(3)
-                    break
-            except Exception as e:
-                logger.warning(f"  ⚠️  Failed to use input {i}: {e}")
-                continue
+                logger.info(f"  🔍 Trying selector: {sel}")
+                btn = await page.wait_for_selector(sel, timeout=3000)
+                if btn:
+                    logger.info(f"  ✅ Found upload button, clicking...")
+                    await btn.click()
+                    await asyncio.sleep(1)
 
-        # Try clicking upload button with FileChooser
-        if not uploaded:
-            logger.info("  🔍 Trying to find upload button...")
-
-            # Strategy 1: Use page.set_input_files with file chooser
-            selectors = [
-                'button[aria-label="Open upload file menu"]',
-                'button[aria-label*="upload file menu" i]',
-                'button[aria-label*="Upload" i]',
-                'button[aria-label*="attach" i]',
-                'button[aria-label*="Attach" i]',
-            ]
-
-            for sel in selectors:
-                try:
-                    logger.info(f"  🔍 Trying selector: {sel}")
-                    btn = await page.wait_for_selector(sel, timeout=3000)
-                    if btn:
-                        logger.info(f"  ✅ Found upload button, clicking...")
-
-                        await btn.click()
-                        logger.info("  ⏳ Waiting 1 second after click...")
-                        await asyncio.sleep(1)
-
-                        # Try to find file input after clicking
-                        file_input = await page.query_selector('input[type="file"][accept*="image"]')
-                        if not file_input:
-                            file_input = await page.query_selector('input[type="file"]')
-
-                        if file_input:
-                            logger.info("  ✅ Found file input after clicking button")
-                            await file_input.set_input_files(str(image_path))
+                    # Look for "Upload files" menu item
+                    logger.info("  🔍 Looking for 'Upload files' menu item...")
+                    menu_item = await page.wait_for_selector(
+                        'button:has-text("Upload files"), button:has-text("Upload"), button:has-text("上传")',
+                        timeout=3000
+                    )
+                    if menu_item:
+                        logger.info("  ✅ Found menu item, clicking with file chooser...")
+                        try:
+                            async with page.expect_file_chooser(timeout=10000) as fc_info:
+                                await menu_item.click()
+                            file_chooser = await fc_info.value
+                            await file_chooser.set_files(str(image_path))
+                            logger.info("  ✅ File set via file chooser")
                             uploaded = True
                             await asyncio.sleep(3)
                             break
-                        else:
-                            # Look for menu items
-                            logger.info("  🔍 Looking for upload menu items...")
-                            upload_menu_items = [
-                                'button:has-text("Upload")',
-                                'button:has-text("上传")',
-                                'div[role="menuitem"]:has-text("image")',
-                                'div[role="menuitem"]:has-text("图片")',
-                                '[data-value*="image"]',
-                            ]
-
-                            for menu_sel in upload_menu_items:
-                                try:
-                                    menu_item = await page.wait_for_selector(menu_sel, timeout=1000)
-                                    if menu_item:
-                                        logger.info(f"  ✅ Found menu item: {menu_sel}")
-                                        await menu_item.click()
-                                        await asyncio.sleep(1)
-
-                                        file_input = await page.query_selector('input[type="file"]')
-                                        if file_input:
-                                            logger.info("  ✅ Found file input after clicking menu item")
-                                            await file_input.set_input_files(str(image_path))
-                                            uploaded = True
-                                            await asyncio.sleep(3)
-                                            break
-                                except:
-                                    continue
-
-                                if uploaded:
-                                    break
-
-                except Exception as e:
-                    logger.warning(f"  ⚠️  Selector {sel} failed: {e}")
-                    continue
-
-                if uploaded:
-                    break
-
-        # Strategy 2: Click button and look for any file input
-        if not uploaded:
-            logger.info("  🔍 Trying alternative approach: click button then find input...")
-            try:
-                # Screenshot before clicking
-                screenshot_before = f"/tmp/debug_before_upload_click_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-                await page.screenshot(path=screenshot_before, full_page=True)
-                logger.info(f"  📸 Screenshot saved: {screenshot_before}")
-
-                btn = await page.wait_for_selector('button[aria-label*="upload" i]', timeout=3000)
-                if btn:
-                    await btn.click()
-                    logger.info("  ✅ Clicked upload button, waiting 3 seconds for input...")
-                    await asyncio.sleep(3)
-
-                    # Screenshot after clicking
-                    screenshot_after = f"/tmp/debug_after_upload_click_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-                    await page.screenshot(path=screenshot_after, full_page=True)
-                    logger.info(f"  📸 Screenshot saved: {screenshot_after}")
-
-                    # Look for ANY input element (not just type="file")
-                    logger.info("  🔍 Looking for ANY input elements on page...")
-                    all_inputs = await page.query_selector_all('input')
-                    logger.info(f"  ℹ️  Found {len(all_inputs)} total input elements")
-
-                    for i, inp in enumerate(all_inputs):
-                        try:
-                            inp_type = await inp.get_attribute('type') or 'text'
-                            inp_id = await inp.get_attribute('id') or ''
-                            inp_name = await inp.get_attribute('name') or ''
-                            logger.info(f"  📋 Input {i}: type={inp_type}, id={inp_id}, name={inp_name}")
-
-                            # Try to set file on any input
-                            if inp_type in ['file', '']:
-                                logger.info(f"  ✅ Trying to set file on input {i}")
-                                await inp.set_input_files(str(image_path))
-                                uploaded = True
-                                await asyncio.sleep(3)
-                                break
-                        except Exception as e:
-                            logger.warning(f"  ⚠️  Input {i} failed: {e}")
-
-                    if not uploaded:
-                        # Try to find drop zone or other upload mechanisms
-                        logger.info("  🔍 Looking for drop zones or other upload areas...")
-                        drop_zones = await page.query_selector_all('[role="presentation"], [class*="drop"], [class*="upload"]')
-                        logger.info(f"  ℹ️  Found {len(drop_zones)} potential drop zones")
-
+                        except Exception as fc_err:
+                            logger.warning(f"  ⚠️  File chooser failed: {fc_err}")
             except Exception as e:
-                logger.warning(f"  ⚠️  Alternative approach failed: {e}")
+                logger.warning(f"  ⚠️  Selector {sel} failed: {e}")
+                continue
 
-        # Strategy 3: Last resort - try ALL file inputs on page
+            if uploaded:
+                break
+
+        # Fallback: Try to find existing file input
         if not uploaded:
-            logger.info("  🔍 Last resort: trying all file inputs on page...")
-            try:
-                file_inputs = await page.query_selector_all('input[type="file"]')
-                logger.info(f"  ℹ️  Found {len(file_inputs)} file input(s)")
-                for i, fi in enumerate(file_inputs):
-                    try:
-                        logger.info(f"  📋 Attempting to use input {i}")
+            logger.info("  🔍 Looking for existing file input elements...")
+            file_inputs = await page.query_selector_all('input[type="file"]')
+            for fi in file_inputs:
+                try:
+                    accept = await fi.get_attribute("accept")
+                    if accept and "image" in accept:
                         await fi.set_input_files(str(image_path))
                         uploaded = True
-                        logger.info(f"  ✅ Successfully uploaded using input {i}")
                         await asyncio.sleep(2)
                         break
-                    except Exception as e:
-                        logger.warning(f"  ⚠️  Input {i} failed: {e}")
-                        continue
-            except Exception as e:
-                logger.warning(f"  ⚠️  Last resort failed: {e}")
-
-        # Strategy 4: Try drag and drop approach
-        if not uploaded:
-            logger.info("  🔍 Trying drag and drop approach...")
-            try:
-                # Read file as base64 for data transfer
-                with open(image_path, "rb") as f:
-                    file_data = base64.b64encode(f.read()).decode()
-
-                # Try to find contenteditable area and inject image
-                content_editables = await page.query_selector_all('[contenteditable="true"]')
-                logger.info(f"  ℹ️  Found {len(content_editables)} contenteditable elements")
-
-                for i, elem in enumerate(content_editables):
-                    try:
-                        logger.info(f"  📋 Trying contenteditable {i}")
-                        await elem.click()
-
-                        # Try to paste image
-                        await page.evaluate("""
-                            async (data) => {
-                                // Create blob from base64
-                                const byteCharacters = atob(data);
-                                const byteNumbers = new Array(byteCharacters.length);
-                                for (let i = 0; i < byteCharacters.length; i++) {
-                                    byteNumbers[i] = byteCharacters.charCodeAt(i);
-                                }
-                                const byteArray = new Uint8Array(byteNumbers);
-                                const blob = new Blob([byteArray], {type: 'image/png'});
-
-                                // Create clipboard item
-                                const item = new ClipboardItem({'image/png': blob});
-                                await navigator.clipboard.write([item]);
-                            }
-                        """, file_data)
-
-                        logger.info("  ✅ Image data copied to clipboard")
-                        await asyncio.sleep(1)
-
-                        # Paste using keyboard
-                        await page.keyboard.press('Meta+v')  # Cmd+V on Mac
-                        logger.info("  ✅ Pressed Cmd+V to paste")
-                        await asyncio.sleep(2)
-
-                        # Verify upload
-                        uploaded_img = await page.query_selector('img[src*="blob"], img[src*="googleusercontent"]')
-                        if uploaded_img:
-                            logger.info("  ✅ Image appears to be uploaded via paste!")
-                            uploaded = True
-                            break
-                    except Exception as e:
-                        logger.warning(f"  ⚠️  Contenteditable {i} failed: {e}")
-                        continue
-
-            except Exception as e:
-                logger.warning(f"  ⚠️  Drag and drop approach failed: {e}")
-
-        # Strategy 5: Use JavaScript to reveal hidden file inputs (from original script)
-        if not uploaded:
-            logger.info("  🔍 Using JavaScript to reveal hidden file inputs...")
-            try:
-                await page.evaluate('''() => {
-                    const inputs = document.querySelectorAll('input[type="file"]');
-                    inputs.forEach(input => {
-                        input.style.display = 'block';
-                        input.style.visibility = 'visible';
-                        input.style.opacity = '1';
-                    });
-                }''')
-                await asyncio.sleep(0.5)
-
-                file_input = await page.query_selector('input[type="file"]')
-                if file_input:
-                    try:
-                        await file_input.set_input_files(str(image_path))
-                        logger.info("  ✅ Image uploaded via revealed file input!")
-                        uploaded = True
-                        await asyncio.sleep(3)
-                    except Exception as e:
-                        logger.warning(f"  ⚠️  Upload via revealed input failed: {e}")
-                else:
-                    logger.warning("  ⚠️  No file input found even after revealing")
-            except Exception as e:
-                logger.warning(f"  ⚠️  Reveal strategy failed: {e}")
+                except:
+                    continue
 
         if uploaded:
             logger.info("  ✅ Image uploaded successfully")
         else:
             logger.warning(f"  ⚠️  WARNING: Could not upload reference image: {image_path}")
-            logger.warning("  ⚠️  Continuing without reference image...")
 
         return uploaded
 

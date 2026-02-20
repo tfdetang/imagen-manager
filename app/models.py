@@ -79,3 +79,18 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     concurrent_tasks: int
     max_concurrent: int
+
+
+class CleanupResponse(BaseModel):
+    """Cleanup operation response."""
+
+    deleted_count: int = Field(..., description="Number of files deleted")
+    deleted_files: list[str] = Field(..., description="List of deleted filenames")
+
+
+class CookiesUploadResponse(BaseModel):
+    """Cookies upload response."""
+
+    success: bool = Field(..., description="Whether upload was successful")
+    message: str = Field(..., description="Status message")
+    cookie_count: int = Field(..., description="Number of cookies saved")

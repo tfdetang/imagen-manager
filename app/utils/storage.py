@@ -35,16 +35,23 @@ class ImageStorage:
 
         return url, str(dest_path.absolute())
 
-    def cleanup_old_files(self, max_age_hours: int = 24):
+    def cleanup_old_files(self, max_age_hours: int = 24) -> list[str]:
         """
         Remove files older than max_age_hours.
 
         Args:
             max_age_hours: Maximum file age in hours
+
+        Returns:
+            List of deleted filenames
         """
         cutoff = time.time() - (max_age_hours * 3600)
+        deleted = []
 
         for file in self.storage_dir.glob("img_*.png"):
             if file.stat().st_mtime < cutoff:
+                deleted.append(file.name)
                 file.unlink()
                 print(f"Cleaned up old file: {file.name}")
+
+        return deleted

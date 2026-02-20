@@ -6,19 +6,13 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import router
 from app.config import settings
-from app.utils.storage import ImageStorage
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
-    # Startup: cleanup old files
-    storage = ImageStorage(settings.storage_dir, settings.base_url)
-    storage.cleanup_old_files(settings.cleanup_hours)
-    print(f"Cleaned up files older than {settings.cleanup_hours} hours")
-
+    # Startup: no automatic cleanup (use POST /v1/cleanup to trigger manually)
     yield
-
     # Shutdown: nothing to cleanup
 
 

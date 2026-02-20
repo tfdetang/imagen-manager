@@ -13,6 +13,34 @@ class CookieManager:
         self._cookies_cache: list[dict[str, Any]] | None = None
         self._last_load_time: float | None = None
 
+    def clear_cache(self):
+        """Clear the cookies cache to force reload on next access."""
+        self._cookies_cache = None
+        self._last_load_time = None
+
+    def save_cookies(self, cookies_data: list[dict]) -> Path:
+        """
+        Save cookies to cookies.txt file.
+
+        Args:
+            cookies_data: List of cookie dictionaries
+
+        Returns:
+            Path to saved file
+        """
+        # Ensure parent directory exists
+        self.cookies_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Save to cookies.txt (preferred format)
+        txt_path = self.cookies_path.parent / "cookies.txt"
+        with open(txt_path, "w") as f:
+            json.dump(cookies_data, f, indent=2)
+
+        # Clear cache so new cookies are loaded
+        self.clear_cache()
+
+        return txt_path
+
     def load_cookies(self) -> list[dict[str, Any]]:
         """Load and convert cookies with 5-minute caching."""
         # Check cache first

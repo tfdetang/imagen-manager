@@ -8,7 +8,7 @@ from typing import List
 from fastapi import APIRouter, Depends, File, Form, UploadFile, HTTPException
 
 from app.auth import verify_api_key
-from app.models import GenerateImageRequest, ImageResponse, ImageData, HealthResponse
+from app.models import GenerateImageRequest, ImageResponse, ImageData, HealthResponse, CleanupResponse, CookiesUploadResponse
 from app.core.generator import ImageGenerator
 from app.core.browser import CookieManager
 from app.core.semaphore import ConcurrencyManager
@@ -235,3 +235,73 @@ async def health_check():
         concurrent_tasks=concurrency_manager.active_tasks,
         max_concurrent=concurrency_manager.max_concurrent,
     )
+
+
+@router.post("/v1/cleanup", response_model=CleanupResponse)
+async def cleanup_old_images(
+    max_age_hours: int | None = None,
+    _: str = Depends(verify_api_key),
+):
+    """
+    Manually trigger cleanup of old generated images.
+
+    Args:
+        max_age_hours: Override default cleanup age (uses CLEANUP_HOURS from config if not specified)
+    """
+    hours = max_age_hours if max_age_hours is not None else settings.cleanup_hours
+    deleted_files = storage.cleanup_old_files(hours)
+
+    return CleanupResponse(
+        deleted_count=len(deleted_files),
+        deleted_files=deleted_files,
+    )
+
+
+@router.post("/v1/cookies", response_model=CookiesUploadResponse)
+async def upload_cookies(
+    file: UploadFile = File(..., description="Cookies JSON file exported from browser"),
+    _: str = Depends(verify_api_key),
+):
+    """
+    Upload and update cookies file for Gemini authentication.
+
+    Accepts JSON format exported from browser extensions like "EditThisCookie" or "Cookie-Editor".
+    """
+    import json
+
+    try:
+        content = await file.read()
+        cookies_data = json.loads(content.decode("utf-8"))
+
+        if not isinstance(cookies_data, list):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": {
+                        "message": "Invalid cookies format. Expected a JSON array.",
+                        "type": "invalid_request_error",
+                        "code": "invalid_format",
+                    }
+                },
+            )
+
+        saved_path = cookie_manager.save_cookies(cookies_data)
+        logger.info(f"Cookies saved to {saved_path}, {len(cookies_data)} cookies")
+
+        return CookiesUploadResponse(
+            success=True,
+            message=f"Cookies saved successfully to {saved_path.name}",
+            cookie_count=len(cookies_data),
+        )
+
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "message": f"Invalid JSON: {str(e)}",
+                    "type": "invalid_request_error",
+                    "code": "invalid_json",
+                }
+            },
+        )
