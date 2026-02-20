@@ -40,7 +40,7 @@ async def test_generate_without_auth():
         response = await client.post(
             "/v1/images/generations", json={"prompt": "test"}
         )
-        assert response.status_code == 403  # No auth header
+        assert response.status_code == 401  # No auth header
 
 
 @pytest.mark.asyncio
@@ -56,8 +56,9 @@ async def test_generate_with_invalid_auth():
         )
         assert response.status_code == 401
         data = response.json()
-        assert "error" in data
-        assert data["error"]["code"] == "invalid_api_key"
+        assert "detail" in data
+        assert "error" in data["detail"]
+        assert data["detail"]["error"]["code"] == "invalid_api_key"
 
 
 @pytest.mark.asyncio

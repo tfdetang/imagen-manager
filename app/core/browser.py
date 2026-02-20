@@ -8,8 +8,9 @@ from typing import Any
 class CookieManager:
     """Manages Google cookies for Gemini authentication."""
 
-    def __init__(self, cookies_path: Path):
+    def __init__(self, cookies_path: Path, prefer_configured_path: bool = False):
         self.cookies_path = cookies_path
+        self.prefer_configured_path = prefer_configured_path
         self._cookies_cache: list[dict[str, Any]] | None = None
         self._last_load_time: float | None = None
 
@@ -31,15 +32,17 @@ class CookieManager:
         # Ensure parent directory exists
         self.cookies_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Save to cookies.txt (preferred format)
-        txt_path = self.cookies_path.parent / "cookies.txt"
-        with open(txt_path, "w") as f:
+        # Save strategy:
+        # - Multi-account mode (prefer_configured_path): save to configured path
+        # - Legacy mode: save to cookies.txt for compatibility
+        save_path = self.cookies_path if self.prefer_configured_path else (self.cookies_path.parent / "cookies.txt")
+        with open(save_path, "w") as f:
             json.dump(cookies_data, f, indent=2)
 
         # Clear cache so new cookies are loaded
         self.clear_cache()
 
-        return txt_path
+        return save_path
 
     def load_cookies(self) -> list[dict[str, Any]]:
         """Load and convert cookies with 5-minute caching."""
@@ -69,6 +72,10 @@ class CookieManager:
 
     def _find_cookies_file(self) -> Path | None:
         """Auto-detect cookies file (cookies.txt or cookies.json)."""
+        # Prefer configured path when using per-account cookie files.
+        if self.prefer_configured_path and self.cookies_path.exists():
+            return self.cookies_path
+
         # Priority 1: cookies.txt (browser export format)
         txt_path = self.cookies_path.parent / "cookies.txt"
         if txt_path.exists():

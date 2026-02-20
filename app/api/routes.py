@@ -1,6 +1,7 @@
 """API route definitions."""
 import logging
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -9,19 +10,131 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile, HTTPException
 
 from app.auth import verify_api_key
 from app.models import GenerateImageRequest, ImageResponse, ImageData, HealthResponse, CleanupResponse, CookiesUploadResponse
-from app.core.generator import ImageGenerator
 from app.core.browser import CookieManager
+from app.core.account_pool import AccountPool
 from app.core.semaphore import ConcurrencyManager
 from app.utils.storage import ImageStorage
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _discover_account_sources() -> list[tuple[str, Path]]:
+    """Discover account cookie files from accounts directory, fallback to default."""
+    account_sources: list[tuple[str, Path]] = []
+    accounts_dir = settings.accounts_dir
+
+    if accounts_dir.exists() and accounts_dir.is_dir():
+        for entry in sorted(accounts_dir.iterdir()):
+            if entry.name.startswith("."):
+                continue
+
+            if entry.is_dir():
+                txt_path = entry / "cookies.txt"
+                json_path = entry / "cookies.json"
+                if txt_path.exists():
+                    account_sources.append((entry.name, txt_path))
+                elif json_path.exists():
+                    account_sources.append((entry.name, json_path))
+                continue
+
+            if entry.suffix.lower() in {".json", ".txt"}:
+                account_sources.append((entry.stem, entry))
+
+    if not account_sources:
+        account_sources.append(("default", settings.cookies_path))
+
+    return account_sources
+
+
+def _is_cookies_expired_error(exc: HTTPException) -> bool:
+    """Check whether HTTPException indicates cookie expiration."""
+    detail = exc.detail if isinstance(exc.detail, dict) else {}
+    error = detail.get("error", {}) if isinstance(detail, dict) else {}
+    return error.get("code") == "cookies_expired"
+
+
+def _normalize_account_id(raw_value: str | None) -> str:
+    """Normalize and validate account id."""
+    value = (raw_value or "default").strip().lower()
+    if not value:
+        return "default"
+
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", value):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "message": "Invalid account_id. Use 1-64 chars: a-z, 0-9, -, _",
+                    "type": "invalid_request_error",
+                    "code": "invalid_account_id",
+                }
+            },
+        )
+
+    return value
+
+
+async def _generate_with_account_pool(
+    prompt: str,
+    timeout: int,
+    reference_images: list[Path] | None = None,
+) -> Path:
+    """Generate image with account failover on cookie-expired errors."""
+    max_attempts = 2
+    last_error: HTTPException | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        lease = await account_pool.acquire()
+        logger.info(f"Assigned account '{lease.account_id}' for generation (attempt {attempt}/{max_attempts})")
+
+        try:
+            image_path = await lease.generator.generate(
+                prompt=prompt,
+                timeout=timeout,
+                reference_images=reference_images,
+            )
+            return image_path
+        except HTTPException as exc:
+            if _is_cookies_expired_error(exc):
+                account_pool.mark_cooldown(
+                    lease.account_id,
+                    settings.account_cooldown_seconds,
+                    reason="cookies_expired",
+                )
+                logger.warning(
+                    f"Account '{lease.account_id}' marked cooldown for {settings.account_cooldown_seconds}s (cookies expired)"
+                )
+                last_error = exc
+                if attempt < max_attempts:
+                    continue
+            raise
+        finally:
+            account_pool.release(lease)
+
+    if last_error:
+        raise last_error
+
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "error": {
+                "message": "No available cookie account",
+                "type": "service_error",
+                "code": "accounts_unavailable",
+            }
+        },
+    )
+
 # Initialize singletons
 cookie_manager = CookieManager(settings.cookies_path)
 concurrency_manager = ConcurrencyManager(settings.max_concurrent_tasks)
 storage = ImageStorage(settings.storage_dir, settings.base_url)
-generator = ImageGenerator(cookie_manager, settings.effective_proxy)
+account_pool = AccountPool(
+    _discover_account_sources(),
+    proxy=settings.effective_proxy,
+    per_account_concurrent=settings.per_account_concurrent_tasks,
+)
 
 router = APIRouter()
 
@@ -54,7 +167,7 @@ async def generate_image(
 
     try:
         # Generate image
-        temp_image = await generator.generate(
+        temp_image = await _generate_with_account_pool(
             prompt=request.prompt,
             timeout=settings.default_timeout,
         )
@@ -181,7 +294,7 @@ async def edit_image(
         try:
             # Generate image with reference images
             logger.info(f"Generating image with {len(temp_uploads)} reference image(s)")
-            temp_image = await generator.generate(
+            temp_image = await _generate_with_account_pool(
                 prompt=prompt,
                 timeout=settings.default_timeout,
                 reference_images=temp_uploads,  # Pass list of images
@@ -230,10 +343,14 @@ async def edit_image(
 @router.get("/v1/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint (no authentication required)."""
+    account_stats = account_pool.stats()
     return HealthResponse(
         status="ok",
         concurrent_tasks=concurrency_manager.active_tasks,
         max_concurrent=concurrency_manager.max_concurrent,
+        accounts_total=account_stats["accounts_total"],
+        accounts_available=account_stats["accounts_available"],
+        accounts=account_stats["accounts"],
     )
 
 
@@ -260,6 +377,7 @@ async def cleanup_old_images(
 @router.post("/v1/cookies", response_model=CookiesUploadResponse)
 async def upload_cookies(
     file: UploadFile = File(..., description="Cookies JSON file exported from browser"),
+    account_id: str | None = Form(None, description="Account id to update (default: default)"),
     _: str = Depends(verify_api_key),
 ):
     """
@@ -285,13 +403,26 @@ async def upload_cookies(
                 },
             )
 
-        saved_path = cookie_manager.save_cookies(cookies_data)
-        logger.info(f"Cookies saved to {saved_path}, {len(cookies_data)} cookies")
+        target_account = _normalize_account_id(account_id)
+        target_manager = account_pool.get_cookie_manager(target_account)
+        if not target_manager:
+            if target_account == "default":
+                target_manager = cookie_manager
+            else:
+                account_dir = settings.accounts_dir / target_account
+                account_dir.mkdir(parents=True, exist_ok=True)
+                cookies_file = account_dir / "cookies.json"
+                target_manager = account_pool.add_or_update_account(target_account, cookies_file)
+
+        saved_path = target_manager.save_cookies(cookies_data)
+        account_pool.clear_cooldown(target_account)
+        logger.info(f"Cookies saved to {saved_path}, account={target_account}, {len(cookies_data)} cookies")
 
         return CookiesUploadResponse(
             success=True,
             message=f"Cookies saved successfully to {saved_path.name}",
             cookie_count=len(cookies_data),
+            account_id=target_account,
         )
 
     except json.JSONDecodeError as e:

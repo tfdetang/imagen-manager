@@ -8,6 +8,7 @@ OpenAI-compatible REST API for Google Gemini Imagen 3 image generation and editi
 ✅ **Text-to-Image** - Generate images from text prompts
 ✅ **Image-to-Image** - Edit existing images with prompts
 ✅ **Concurrent Control** - Configurable concurrent request limits
+✅ **Multi-Account Pool** - Multiple cookies accounts with automatic scheduling/failover
 ✅ **Auto Cleanup** - Automatic cleanup of old generated images
 ✅ **Cookie Persistence** - Smart cookie caching and management
 
@@ -43,6 +44,20 @@ Export your Google cookies from browser and save to `data/cookies.json`:
 - Visit https://gemini.google.com and login
 - Export cookies as JSON
 - Save to `data/cookies.json`
+
+#### Optional: Multi-account cookies pool
+
+You can place multiple accounts under `data/accounts/`:
+
+```text
+data/accounts/
+├── account-a/
+│   └── cookies.json
+└── account-b/
+  └── cookies.txt
+```
+
+The service auto-discovers all accounts and schedules requests across them.
 
 ### 4. Run Server
 
@@ -152,7 +167,19 @@ Health check (no authentication required).
 {
   "status": "ok",
   "concurrent_tasks": 2,
-  "max_concurrent": 5
+  "max_concurrent": 5,
+  "accounts_total": 2,
+  "accounts_available": 1,
+  "accounts": [
+    {
+      "account_id": "account-a",
+      "enabled": true,
+      "active_tasks": 1,
+      "in_cooldown": false,
+      "cooldown_remaining": 0,
+      "last_error": null
+    }
+  ]
 }
 ```
 
@@ -169,6 +196,9 @@ Environment variables in `.env`:
 | `USE_PROXY` | true | Enable/disable proxy |
 | `CLEANUP_HOURS` | 24 | Auto-delete images older than X hours |
 | `COOKIES_PATH` | ./data/cookies.json | Path to Google cookies file |
+| `ACCOUNTS_DIR` | ./data/accounts | Directory for multi-account cookies |
+| `PER_ACCOUNT_CONCURRENT_TASKS` | 1 | Max concurrent tasks per cookies account |
+| `ACCOUNT_COOLDOWN_SECONDS` | 600 | Cooldown when an account cookies expires |
 
 ## Testing
 

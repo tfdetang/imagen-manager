@@ -73,12 +73,26 @@ class ErrorResponse(BaseModel):
     error: ErrorDetail
 
 
+class AccountHealth(BaseModel):
+    """Per-account runtime status."""
+
+    account_id: str
+    enabled: bool
+    active_tasks: int
+    in_cooldown: bool
+    cooldown_remaining: int
+    last_error: str | None = None
+
+
 class HealthResponse(BaseModel):
     """Health check response."""
 
     status: str = "ok"
     concurrent_tasks: int
     max_concurrent: int
+    accounts_total: int | None = None
+    accounts_available: int | None = None
+    accounts: list[AccountHealth] | None = None
 
 
 class CleanupResponse(BaseModel):
@@ -94,3 +108,4 @@ class CookiesUploadResponse(BaseModel):
     success: bool = Field(..., description="Whether upload was successful")
     message: str = Field(..., description="Status message")
     cookie_count: int = Field(..., description="Number of cookies saved")
+    account_id: str = Field(..., description="Account id that was updated")

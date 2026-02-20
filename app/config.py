@@ -26,6 +26,9 @@ class Settings(BaseSettings):
 
     # Cookie Configuration
     cookies_path: Path = Path("./data/cookies.json")
+    accounts_dir: Path = Path("./data/accounts")
+    per_account_concurrent_tasks: int = 1
+    account_cooldown_seconds: int = 600
 
     model_config = SettingsConfigDict(
         env_file=".env",

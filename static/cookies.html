@@ -20,7 +20,7 @@
             border-radius: 16px;
             box-shadow: 0 20px 60px rgba(0,0,0,0.3);
             padding: 40px;
-            max-width: 500px;
+            max-width: 760px;
             width: 100%;
         }
         h1 {
@@ -42,7 +42,7 @@
             font-weight: 500;
             margin-bottom: 8px;
         }
-        input[type="password"], input[type="file"] {
+        input[type="password"], input[type="file"], input[type="text"], select {
             width: 100%;
             padding: 12px;
             border: 2px solid #e0e0e0;
@@ -123,17 +123,77 @@
         .help h3 { color: #333; margin-bottom: 10px; font-size: 14px; }
         .help ol { padding-left: 20px; }
         .help li { margin-bottom: 5px; }
+        .account-panel {
+            margin-top: 22px;
+            border: 1px solid #e8e8e8;
+            border-radius: 10px;
+            padding: 16px;
+            background: #fafafa;
+        }
+        .account-panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+        .account-panel-header h3 {
+            font-size: 14px;
+            color: #333;
+        }
+        .mini-btn {
+            width: auto;
+            padding: 8px 12px;
+            font-size: 13px;
+            border-radius: 6px;
+        }
+        .account-list {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        .account-list th,
+        .account-list td {
+            border-bottom: 1px solid #eee;
+            padding: 8px 6px;
+            text-align: left;
+        }
+        .account-list th {
+            color: #666;
+            font-weight: 600;
+        }
+        .tag {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .tag.ok { background: #e8f7ea; color: #1e7f3b; }
+        .tag.cooldown { background: #fff6df; color: #9a6a00; }
+        .tag.busy { background: #eef1ff; color: #3f53c7; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🍪 Cookies 管理</h1>
-        <p class="subtitle">上传 Google 账号 Cookies 以启用 Gemini Imagen 功能</p>
+        <p class="subtitle">上传并管理多个 Google 账号 Cookies，支持按账号更新</p>
 
         <form id="uploadForm">
             <div class="form-group">
                 <label for="apiKey">API Key</label>
                 <input type="password" id="apiKey" placeholder="输入你的 API Key" required>
+            </div>
+
+            <div class="form-group">
+                <label for="accountSelect">选择账号</label>
+                <select id="accountSelect">
+                    <option value="default">default</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="newAccountId">或新建账号 ID（可选）</label>
+                <input type="text" id="newAccountId" placeholder="例如: team_a_01（a-z,0-9,_,-）">
             </div>
 
             <div class="form-group">
@@ -150,6 +210,28 @@
         </form>
 
         <div class="result" id="result"></div>
+
+        <div class="account-panel">
+            <div class="account-panel-header">
+                <h3>账号状态</h3>
+                <button type="button" id="refreshBtn" class="mini-btn">刷新</button>
+            </div>
+            <table class="account-list">
+                <thead>
+                    <tr>
+                        <th>账号</th>
+                        <th>状态</th>
+                        <th>活跃任务</th>
+                        <th>冷却剩余</th>
+                    </tr>
+                </thead>
+                <tbody id="accountTableBody">
+                    <tr>
+                        <td colspan="4" style="color:#999;">暂无数据</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
 
         <div class="help">
             <h3>如何导出 Cookies？</h3>
@@ -169,6 +251,10 @@
         const dropZone = document.getElementById('dropZone');
         const result = document.getElementById('result');
         const submitBtn = document.getElementById('submitBtn');
+        const refreshBtn = document.getElementById('refreshBtn');
+        const accountSelect = document.getElementById('accountSelect');
+        const accountTableBody = document.getElementById('accountTableBody');
+        const newAccountIdInput = document.getElementById('newAccountId');
 
         fileInput.addEventListener('change', (e) => {
             if (e.target.files[0]) {
@@ -198,14 +284,26 @@
             }
         });
 
+        refreshBtn.addEventListener('click', () => {
+            refreshAccounts();
+        });
+
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
 
             const apiKey = document.getElementById('apiKey').value;
             const file = fileInput.files[0];
+            const selectedAccountId = accountSelect.value;
+            const typedNewAccountId = newAccountIdInput.value.trim();
+            const targetAccountId = typedNewAccountId || selectedAccountId;
 
             if (!file) {
                 showResult('请选择 Cookies 文件', false);
+                return;
+            }
+
+            if (!targetAccountId) {
+                showResult('请选择或输入账号 ID', false);
                 return;
             }
 
@@ -215,6 +313,7 @@
             try {
                 const formData = new FormData();
                 formData.append('file', file);
+                formData.append('account_id', targetAccountId);
 
                 const response = await fetch('/v1/cookies', {
                     method: 'POST',
@@ -225,7 +324,9 @@
                 const data = await response.json();
 
                 if (response.ok) {
-                    showResult(`✅ ${data.message}（共 ${data.cookie_count} 个 cookies）`, true);
+                    showResult(`✅ ${data.message}（账号: ${data.account_id}，共 ${data.cookie_count} 个 cookies）`, true);
+                    newAccountIdInput.value = '';
+                    await refreshAccounts();
                 } else {
                     const msg = data.detail?.error?.message || data.detail || '上传失败';
                     showResult(`❌ ${msg}`, false);
@@ -242,6 +343,70 @@
             result.textContent = message;
             result.className = 'result ' + (success ? 'success' : 'error');
         }
+
+        function renderAccountTag(account) {
+            if (account.in_cooldown) {
+                return '<span class="tag cooldown">冷却中</span>';
+            }
+            if (account.active_tasks > 0) {
+                return '<span class="tag busy">忙碌</span>';
+            }
+            return '<span class="tag ok">可用</span>';
+        }
+
+        function updateAccountSelect(accounts) {
+            const current = accountSelect.value;
+            accountSelect.innerHTML = '';
+
+            accounts.forEach((account) => {
+                const option = document.createElement('option');
+                option.value = account.account_id;
+                option.textContent = account.account_id;
+                accountSelect.appendChild(option);
+            });
+
+            if (accounts.length === 0) {
+                const option = document.createElement('option');
+                option.value = 'default';
+                option.textContent = 'default';
+                accountSelect.appendChild(option);
+                return;
+            }
+
+            const exists = accounts.some((account) => account.account_id === current);
+            accountSelect.value = exists ? current : accounts[0].account_id;
+        }
+
+        function updateAccountTable(accounts) {
+            if (!accounts || accounts.length === 0) {
+                accountTableBody.innerHTML = '<tr><td colspan="4" style="color:#999;">暂无数据</td></tr>';
+                return;
+            }
+
+            accountTableBody.innerHTML = accounts.map((account) => `
+                <tr>
+                    <td>${account.account_id}</td>
+                    <td>${renderAccountTag(account)}</td>
+                    <td>${account.active_tasks}</td>
+                    <td>${account.in_cooldown ? account.cooldown_remaining + 's' : '-'}</td>
+                </tr>
+            `).join('');
+        }
+
+        async function refreshAccounts() {
+            try {
+                const response = await fetch('/v1/health');
+                const data = await response.json();
+                const accounts = data.accounts || [];
+
+                updateAccountSelect(accounts);
+                updateAccountTable(accounts);
+            } catch (err) {
+                showResult(`❌ 无法获取账号状态: ${err.message}`, false);
+            }
+        }
+
+        refreshAccounts();
     </script>
 </body>
 </html>
