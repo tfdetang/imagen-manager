@@ -81,11 +81,24 @@ async def _generate_with_account_pool(
     reference_images: list[Path] | None = None,
 ) -> Path:
     """Generate image with account failover on cookie-expired errors."""
-    max_attempts = 2
+    # Try all available accounts
+    max_attempts = account_pool.stats()["accounts_total"]
     last_error: HTTPException | None = None
+    tried_accounts: set[str] = set()
 
     for attempt in range(1, max_attempts + 1):
-        lease = await account_pool.acquire()
+        try:
+            lease = await account_pool.acquire()
+        except HTTPException:
+            # No available accounts
+            break
+
+        # Skip if we already tried this account
+        if lease.account_id in tried_accounts:
+            account_pool.release(lease)
+            break
+
+        tried_accounts.add(lease.account_id)
         logger.info(f"Assigned account '{lease.account_id}' for generation (attempt {attempt}/{max_attempts})")
 
         try:
@@ -106,8 +119,8 @@ async def _generate_with_account_pool(
                     f"Account '{lease.account_id}' marked cooldown for {settings.account_cooldown_seconds}s (cookies expired)"
                 )
                 last_error = exc
-                if attempt < max_attempts:
-                    continue
+                # Continue to try next account
+                continue
             raise
         finally:
             account_pool.release(lease)

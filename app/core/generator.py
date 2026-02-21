@@ -166,29 +166,66 @@ class ImageGenerator:
 
     async def _verify_login(self, page: Page):
         """Verify user is logged in to Gemini."""
-        content = await page.content()
+        logger.info("  🔍 Checking login status...")
 
-        # Check for login indicators
-        has_signin = "Sign in" in content
-        has_pro = "PRO" in content
-        has_version = "1.5" in content or "2.0" in content
+        # Check 1: URL should not be redirected to accounts.google.com
+        current_url = page.url
+        logger.info(f"  🔗 Current URL: {current_url}")
 
-        logger.info(f"  🔍 Login check - Sign in: {has_signin}, PRO: {has_pro}, Version: {has_version}")
-
-        if has_signin and not has_pro and not has_version:
-            logger.error("❌ Not logged in! Cookies may be expired")
+        if "accounts.google.com" in current_url:
+            logger.error("❌ Redirected to login page! Cookies may be expired")
             raise HTTPException(
                 status_code=503,
                 detail={
                     "error": {
-                        "message": "Service temporarily unavailable: Google cookies expired",
+                        "message": "Service temporarily unavailable: Google cookies expired (redirected to login)",
                         "type": "service_error",
                         "code": "cookies_expired",
                     }
                 },
             )
 
-        logger.info("  ✅ User is logged in")
+        # Check 2: Look for "Sign in" button in the header area (indicates not logged in)
+        # Gemini can be accessed without login, but we need login for full functionality
+        try:
+            signin_button = await page.wait_for_selector(
+                'a[href*="signin"], button:has-text("Sign in"), a:has-text("Sign in")',
+                timeout=3000
+            )
+            if signin_button:
+                # Verify it's visible in the header area (not just any "sign in" text)
+                is_visible = await signin_button.is_visible()
+                if is_visible:
+                    logger.error("❌ Found 'Sign in' button - not logged in! Cookies may be expired")
+                    raise HTTPException(
+                        status_code=503,
+                        detail={
+                            "error": {
+                                "message": "Service temporarily unavailable: Google cookies expired (Sign in button visible)",
+                                "type": "service_error",
+                                "code": "cookies_expired",
+                            }
+                        },
+                    )
+        except Exception as e:
+            # No "Sign in" button found - this is good, means user is logged in
+            if "Timeout" in str(e):
+                logger.info("  ✅ No 'Sign in' button found - user appears to be logged in")
+            else:
+                logger.warning(f"  ⚠️  Error checking sign in button: {e}")
+
+        # Check 3: Verify we have the input area (basic functionality check)
+        try:
+            input_area = await page.wait_for_selector(
+                'div[contenteditable="true"], textarea',
+                timeout=5000
+            )
+            if input_area:
+                logger.info("  ✅ Found input area - page loaded correctly")
+        except:
+            logger.warning("  ⚠️  Could not find input area")
+
+        logger.info("  ✅ Login verification passed")
 
     async def _upload_image(self, page: Page, image_path: Path):
         """Upload reference image to Gemini."""
