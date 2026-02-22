@@ -122,9 +122,12 @@ class ImageGenerator:
                 await page.screenshot(path=screenshot_path, full_page=True)
                 logger.info(f"📸 Screenshot saved: {screenshot_path}")
 
-                # Wait for generation
-                logger.info(f"⏳ Waiting {timeout} seconds for image generation...")
-                await asyncio.sleep(timeout)
+                # Wait for generation with polling
+                logger.info(f"⏳ Waiting for image generation (max {timeout}s)...")
+                generation_ready = await self._wait_for_generation(page, timeout)
+
+                if not generation_ready:
+                    logger.warning("⚠️  Generation may not be complete, attempting download anyway...")
 
                 # Save screenshot before download attempt
                 screenshot_path = f"/tmp/debug_before_download_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
@@ -207,8 +210,11 @@ class ImageGenerator:
                             }
                         },
                     )
+        except HTTPException:
+            # Re-raise HTTPException to trigger account switch
+            raise
         except Exception as e:
-            # No "Sign in" button found - this is good, means user is logged in
+            # No "Sign in" button found (timeout) - this is good, means user is logged in
             if "Timeout" in str(e):
                 logger.info("  ✅ No 'Sign in' button found - user appears to be logged in")
             else:
@@ -303,6 +309,121 @@ class ImageGenerator:
 
         return uploaded
 
+    async def _wait_for_generation(self, page: Page, timeout: int) -> bool:
+        """
+        Poll the page to detect when image generation is complete.
+
+        Returns True if generation appears complete, False if timeout reached.
+        """
+        poll_interval = 5  # Check every 5 seconds
+        min_wait = 30  # Minimum wait before first check (generation takes time)
+        elapsed = 0
+
+        # Wait minimum time before starting to poll
+        logger.info(f"  ⏳ Initial wait of {min_wait}s before polling...")
+        await asyncio.sleep(min_wait)
+        elapsed = min_wait
+
+        while elapsed < timeout:
+            # Check for generation complete indicators
+            is_ready, reason = await self._check_generation_status(page)
+
+            if is_ready:
+                # Double check after a short delay to avoid false positives
+                await asyncio.sleep(2)
+                is_still_ready, _ = await self._check_generation_status(page)
+                if is_still_ready:
+                    logger.info(f"  ✅ Generation complete detected after {elapsed}s: {reason}")
+                    return True
+
+            # Check for error indicators
+            has_error, error_msg = await self._check_generation_error(page)
+            if has_error:
+                logger.warning(f"  ⚠️  Generation error detected: {error_msg}")
+                # Still return True to attempt download (might have partial result)
+                return True
+
+            # Wait before next poll
+            remaining = timeout - elapsed
+            wait_time = min(poll_interval, remaining)
+            if wait_time > 0:
+                logger.info(f"  ⏳ Polling... ({elapsed}s/{timeout}s elapsed)")
+                await asyncio.sleep(wait_time)
+                elapsed += wait_time
+
+        logger.warning(f"  ⚠️  Timeout reached ({timeout}s) without detecting completion")
+        return False
+
+    async def _check_generation_status(self, page: Page) -> tuple[bool, str]:
+        """
+        Check if image generation appears to be complete.
+
+        Returns (is_ready, reason) tuple.
+        """
+        # Check 1: Download button appeared (most reliable indicator)
+        try:
+            download_btn = await page.query_selector(
+                'button[aria-label*="download" i]:not([aria-label*="App"]):not([aria-label*="app"])'
+            )
+            if download_btn:
+                is_visible = await download_btn.is_visible()
+                if is_visible:
+                    return True, "Download button visible"
+        except:
+            pass
+
+        # Check 2: Large generated image appeared (must be new, not uploaded reference)
+        try:
+            images = await page.query_selector_all('img[src*="googleusercontent"]')
+            large_image_count = 0
+            for img in images:
+                src = await img.get_attribute("src") or ""
+                # Skip profile pictures and small images
+                if "/a/" in src or "/a-/" in src:
+                    continue
+
+                box = await img.bounding_box()
+                if box and box["width"] >= 256 and box["height"] >= 256:
+                    large_image_count += 1
+
+            # Only consider ready if we have at least one large image
+            # and it's likely a generated image (not just uploaded reference)
+            if large_image_count >= 1:
+                return True, f"Large image detected (count: {large_image_count})"
+        except:
+            pass
+
+        return False, ""
+
+    async def _check_generation_error(self, page: Page) -> tuple[bool, str]:
+        """
+        Check if there's an error message on the page.
+
+        Returns (has_error, error_message) tuple.
+        """
+        error_selectors = [
+            '[class*="error"]',
+            '[class*="warning"]',
+            ':has-text("unable to generate")',
+            ':has-text("无法生成")',
+            ':has-text("try again")',
+            ':has-text("重试")',
+        ]
+
+        for selector in error_selectors:
+            try:
+                elem = await page.query_selector(selector)
+                if elem:
+                    is_visible = await elem.is_visible()
+                    if is_visible:
+                        text = await elem.text_content()
+                        if text and len(text) < 200:  # Avoid capturing large blocks
+                            return True, text.strip()[:100]
+            except:
+                continue
+
+        return False, ""
+
     async def _submit_prompt(self, page: Page, prompt: str, has_image: bool):
         """Enter and submit prompt to Gemini."""
         # Build full prompt
@@ -346,7 +467,7 @@ class ImageGenerator:
         for sel in send_selectors:
             try:
                 logger.info(f"  🔍 Trying selector: {sel}")
-                btn = await page.wait_for_selector(sel, timeout=1000)
+                btn = await page.wait_for_selector(sel, timeout=5000)
                 if btn:
                     logger.info(f"  ✅ Found send button: {sel}")
                     await btn.click()

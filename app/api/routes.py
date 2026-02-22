@@ -81,8 +81,22 @@ async def _generate_with_account_pool(
     reference_images: list[Path] | None = None,
 ) -> Path:
     """Generate image with account failover on cookie-expired errors."""
+    # Check if any account is available before starting
+    stats = account_pool.stats()
+    if stats["accounts_available"] == 0:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": {
+                    "message": "No available cookie account. All accounts are either busy or in cooldown.",
+                    "type": "service_error",
+                    "code": "accounts_unavailable",
+                }
+            },
+        )
+
     # Try all available accounts
-    max_attempts = account_pool.stats()["accounts_total"]
+    max_attempts = stats["accounts_total"]
     last_error: HTTPException | None = None
     tried_accounts: set[str] = set()
 

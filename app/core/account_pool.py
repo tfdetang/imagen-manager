@@ -1,5 +1,6 @@
 """Account pool for multi-cookie parallel image generation."""
 import asyncio
+import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,7 +73,7 @@ class AccountPool:
         )
 
     async def acquire(self) -> AccountLease:
-        """Acquire one available account using least-active strategy."""
+        """Acquire one available account, randomly selected from least-active accounts."""
         now = time.time()
 
         candidates = [
@@ -107,7 +108,13 @@ class AccountPool:
                 },
             )
 
-        selected = min(candidates, key=lambda account: account.active_tasks)
+        # Find minimum active tasks count
+        min_tasks = min(acc.active_tasks for acc in candidates)
+        # Get all accounts with minimum active tasks
+        least_active = [acc for acc in candidates if acc.active_tasks == min_tasks]
+        # Randomly select one from least active accounts
+        selected = random.choice(least_active)
+
         await selected.semaphore.acquire()
         selected.active_tasks += 1
 

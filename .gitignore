@@ -8,8 +8,7 @@ data/cookies.json
 data/cookies.txt
 data/*.json
 data/*.txt
-data/accounts/*.json
-data/accounts/*.txt
+data/accounts/*
 
 # Python
 __pycache__/
