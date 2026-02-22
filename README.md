@@ -7,6 +7,7 @@ OpenAI-compatible REST API for Google Gemini Imagen 3 image generation and editi
 ✅ **OpenAI Compatible** - Drop-in replacement for OpenAI Images API
 ✅ **Text-to-Image** - Generate images from text prompts
 ✅ **Image-to-Image** - Edit existing images with prompts
+✅ **Text-to-Video (Jimeng)** - Generate videos from text prompts via 即梦
 ✅ **Concurrent Control** - Configurable concurrent request limits
 ✅ **Multi-Account Pool** - Multiple cookies accounts with automatic scheduling/failover
 ✅ **Auto Cleanup** - Automatic cleanup of old generated images
@@ -117,6 +118,31 @@ curl -X POST http://localhost:8000/v1/images/edits \
   -F "image=@cat.png" \
   -F "prompt=Make the cat black" \
   -F "n=1"
+
+# Generate video (Jimeng)
+curl -X POST http://localhost:8000/v1/videos/generations \
+  -H "Authorization: Bearer sk-your-secret-key-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "A panda dancing in the snow, cinematic lighting",
+    "n": 1
+  }'
+
+# Async video task create (recommended)
+curl -X POST http://localhost:8000/v2/videos/generations \
+  -H "Authorization: Bearer sk-your-secret-key-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "dance",
+    "model": "doubao-seedance-1-0-lite-i2v-250428",
+    "images": [
+      "https://webstatic.aiproxy.vip/dist/demo.jpg"
+    ]
+  }'
+
+# Async video task query
+curl -X GET http://localhost:8000/v2/videos/generations/<task_id> \
+  -H "Authorization: Bearer sk-your-secret-key-here"
 ```
 
 ## API Endpoints
@@ -158,6 +184,80 @@ Edit image based on prompt.
 
 **Response:** Same as generations
 
+### POST /v1/videos/generations
+
+Generate video from text prompt using Jimeng.
+
+**Request:**
+```json
+{
+  "prompt": "A panda dancing in the snow, cinematic lighting",
+  "n": 1,
+  "response_format": "url"
+}
+```
+
+### POST /v2/videos/generations
+
+Create async video generation task.
+
+**Request:**
+```json
+{
+  "prompt": "dance",
+  "model": "doubao-seedance-1-0-lite-i2v-250428",
+  "images": [
+    "https://webstatic.aiproxy.vip/dist/demo.jpg"
+  ],
+  "duration": 5,
+  "resolution": "720p",
+  "ratio": "16:9"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "vtask_xxx",
+  "created": 1707566096,
+  "status": "queued",
+  "model": "doubao-seedance-1-0-lite-i2v-250428",
+  "result": null,
+  "error": null
+}
+```
+
+### GET /v2/videos/generations/{task_id}
+
+Query async video task status/result.
+
+**Succeeded example:**
+```json
+{
+  "id": "vtask_xxx",
+  "created": 1707566096,
+  "status": "succeeded",
+  "model": "doubao-seedance-1-0-lite-i2v-250428",
+  "result": {
+    "url": "http://localhost:8000/static/generated/vid_abc123.mp4",
+    "last_frame_url": null
+  },
+  "error": null
+}
+```
+
+**Response:**
+```json
+{
+  "created": 1707566096,
+  "data": [
+    {
+      "url": "http://localhost:8000/static/generated/vid_abc123.mp4"
+    }
+  ]
+}
+```
+
 ### GET /v1/health
 
 Health check (no authentication required).
@@ -192,9 +292,11 @@ Environment variables in `.env`:
 | `API_KEY` | - | **Required.** API key for authentication |
 | `MAX_CONCURRENT_TASKS` | 5 | Max concurrent browser instances |
 | `DEFAULT_TIMEOUT` | 60 | Generation timeout in seconds |
+| `VIDEO_TIMEOUT` | 1800 | Video generation timeout in seconds |
 | `PROXY` | http://127.0.0.1:7897 | Proxy server URL |
 | `USE_PROXY` | true | Enable/disable proxy |
 | `CLEANUP_HOURS` | 24 | Auto-delete images older than X hours |
+| `VIDEO_TASKS_PATH` | ./data/video_tasks.json | Persistent JSON file for async video task states |
 | `COOKIES_PATH` | ./data/cookies.json | Path to Google cookies file |
 | `ACCOUNTS_DIR` | ./data/accounts | Directory for multi-account cookies |
 | `PER_ACCOUNT_CONCURRENT_TASKS` | 1 | Max concurrent tasks per cookies account |
@@ -250,6 +352,8 @@ app/
 2. Export fresh cookies
 3. Update `data/cookies.json`
 4. Restart the server
+
+For Jimeng video generation, ensure the same cookies file also contains login cookies for `jimeng.jianying.com` / `jianying.com`.
 
 ### Too Many Requests
 

@@ -1,4 +1,5 @@
 """API route definitions."""
+import asyncio
 import logging
 import os
 import re
@@ -9,10 +10,25 @@ from typing import List
 from fastapi import APIRouter, Depends, File, Form, UploadFile, HTTPException
 
 from app.auth import verify_api_key
-from app.models import GenerateImageRequest, ImageResponse, ImageData, HealthResponse, CleanupResponse, CookiesUploadResponse
+from app.models import (
+    CleanupResponse,
+    CookiesUploadResponse,
+    GenerateImageRequest,
+    GenerateVideoTaskRequest,
+    GenerateVideoRequest,
+    HealthResponse,
+    ImageData,
+    ImageResponse,
+    VideoData,
+    VideoResponse,
+    VideoTaskAssetsResponse,
+    VideoTaskResponse,
+)
 from app.core.browser import CookieManager
 from app.core.account_pool import AccountPool
 from app.core.semaphore import ConcurrencyManager
+from app.core.video_generator import JimengVideoGenerator, VideoGenerationResult
+from app.core.video_tasks import VideoTaskManager, VideoTaskProcessResult
 from app.utils.storage import ImageStorage
 from app.config import settings
 
@@ -153,6 +169,121 @@ async def _generate_with_account_pool(
         },
     )
 
+
+async def _generate_video_with_account_pool(
+    prompt: str,
+    timeout: int,
+    on_binding=None,
+) -> VideoGenerationResult:
+    """Generate Jimeng video with account failover on cookie-expired errors."""
+    stats = account_pool.stats()
+    if stats["accounts_available"] == 0:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": {
+                    "message": "No available cookie account. All accounts are either busy or in cooldown.",
+                    "type": "service_error",
+                    "code": "accounts_unavailable",
+                }
+            },
+        )
+
+    max_attempts = stats["accounts_total"]
+    last_error: HTTPException | None = None
+    tried_accounts: set[str] = set()
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            lease = await account_pool.acquire()
+        except HTTPException:
+            break
+
+        if lease.account_id in tried_accounts:
+            account_pool.release(lease)
+            break
+
+        tried_accounts.add(lease.account_id)
+        logger.info(f"Assigned account '{lease.account_id}' for video generation (attempt {attempt}/{max_attempts})")
+
+        try:
+            cookie_manager_for_account = account_pool.get_cookie_manager(lease.account_id)
+            if not cookie_manager_for_account:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "error": {
+                            "message": f"Cookie manager not found for account: {lease.account_id}",
+                            "type": "service_error",
+                            "code": "account_unavailable",
+                        }
+                    },
+                )
+
+            video_generator = JimengVideoGenerator(
+                cookie_manager_for_account,
+                proxy=settings.effective_proxy,
+            )
+            generation_result = await video_generator.generate(
+                prompt=prompt,
+                timeout=timeout,
+                on_binding=on_binding,
+            )
+            return generation_result
+        except HTTPException as exc:
+            if _is_cookies_expired_error(exc):
+                account_pool.mark_cooldown(
+                    lease.account_id,
+                    settings.account_cooldown_seconds,
+                    reason="cookies_expired",
+                )
+                logger.warning(
+                    f"Account '{lease.account_id}' marked cooldown for {settings.account_cooldown_seconds}s (cookies expired)"
+                )
+                last_error = exc
+                continue
+            raise
+        finally:
+            account_pool.release(lease)
+
+    if last_error:
+        raise last_error
+
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "error": {
+                "message": "No available cookie account",
+                "type": "service_error",
+                "code": "accounts_unavailable",
+            }
+        },
+    )
+
+
+async def _process_video_task_request(
+    request: GenerateVideoTaskRequest,
+    on_binding,
+) -> VideoTaskProcessResult:
+    """Background processor for async video generation task."""
+    await concurrency_manager.acquire()
+    try:
+        generation_result = await _generate_video_with_account_pool(
+            prompt=request.prompt,
+            timeout=max(settings.default_timeout, settings.video_timeout),
+            on_binding=on_binding,
+        )
+        url, _ = storage.save_file(generation_result.media_path, prefix="vid")
+        return VideoTaskProcessResult(
+            url=url,
+            provider_task_id=generation_result.provider_task_id,
+            provider_item_ids=generation_result.provider_item_ids,
+            provider_generate_id=generation_result.provider_generate_id,
+        )
+    finally:
+        concurrency_manager.release()
+
+
 # Initialize singletons
 cookie_manager = CookieManager(settings.cookies_path)
 concurrency_manager = ConcurrencyManager(settings.max_concurrent_tasks)
@@ -161,6 +292,10 @@ account_pool = AccountPool(
     _discover_account_sources(),
     proxy=settings.effective_proxy,
     per_account_concurrent=settings.per_account_concurrent_tasks,
+)
+video_task_manager = VideoTaskManager(
+    _process_video_task_request,
+    storage_path=settings.video_tasks_path,
 )
 
 router = APIRouter()
@@ -209,6 +344,120 @@ async def generate_image(
 
     finally:
         concurrency_manager.release()
+
+
+@router.post("/v1/videos/generations", response_model=VideoResponse)
+async def generate_video(
+    request: GenerateVideoRequest,
+    _: str = Depends(verify_api_key),
+):
+    """
+    Generate video from text prompt using Jimeng.
+    """
+    if request.n != 1:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "message": "Only n=1 is supported",
+                    "type": "invalid_request_error",
+                    "code": "invalid_n",
+                }
+            },
+        )
+
+    await concurrency_manager.acquire()
+
+    try:
+        generation_result = await _generate_video_with_account_pool(
+            prompt=request.prompt,
+            timeout=max(settings.default_timeout, settings.video_timeout),
+        )
+
+        url, _ = storage.save_file(generation_result.media_path, prefix="vid")
+
+        return VideoResponse(
+            created=int(time.time()),
+            data=[VideoData(url=url)],
+        )
+    finally:
+        concurrency_manager.release()
+
+
+@router.post("/v2/videos/generations", response_model=VideoTaskResponse)
+async def create_video_task(
+    request: GenerateVideoTaskRequest,
+    _: str = Depends(verify_api_key),
+):
+    """
+    Create async video generation task.
+    """
+    return await video_task_manager.create_task(request)
+
+
+@router.get("/v2/videos/generations/{task_id}", response_model=VideoTaskResponse)
+async def get_video_task(
+    task_id: str,
+    _: str = Depends(verify_api_key),
+):
+    """
+    Get async video task status/result.
+    """
+    return await video_task_manager.get_task(task_id)
+
+
+@router.get("/v2/videos/generations/{task_id}/assets", response_model=VideoTaskAssetsResponse)
+async def get_video_task_assets(
+    task_id: str,
+    _: str = Depends(verify_api_key),
+):
+    """
+    Fetch matched asset URLs for one async video task by provider task id.
+    """
+    task = await video_task_manager.get_task(task_id)
+    if not task.provider_task_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "message": "Task is not bound to provider_task_id yet",
+                    "type": "invalid_request_error",
+                    "code": "task_not_bound",
+                }
+            },
+        )
+
+    matched_assets: list[str] = []
+    account_ids = [item["account_id"] for item in account_pool.stats().get("accounts", [])]
+
+    for account_id in account_ids:
+        cm = account_pool.get_cookie_manager(account_id)
+        if not cm:
+            continue
+        fetcher = JimengVideoGenerator(cm, proxy=settings.effective_proxy)
+        urls = await fetcher.fetch_asset_urls_by_submit_id(
+            task.provider_task_id,
+            provider_item_ids=task.provider_item_ids,
+        )
+        if urls:
+            matched_assets = urls
+            break
+
+    local_assets: list[str] = []
+    for remote_url in matched_assets:
+        try:
+            local_url, _ = await asyncio.to_thread(storage.save_remote_file, remote_url, "vid")
+            local_assets.append(local_url)
+        except Exception:
+            # Keep remote URL as fallback if caching fails.
+            local_assets.append(remote_url)
+
+    return VideoTaskAssetsResponse(
+        id=task.id,
+        status=task.status,
+        provider_task_id=task.provider_task_id,
+        assets=local_assets,
+    )
 
 
 @router.post("/v1/images/edits", response_model=ImageResponse)

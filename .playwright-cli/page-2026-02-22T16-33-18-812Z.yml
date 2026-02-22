@@ -1,0 +1,86 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - menu [ref=e6]:
+        - menuitem "logo" [ref=e8] [cursor=pointer]:
+          - img "logo" [ref=e10]
+      - menu [ref=e11]:
+        - generic [ref=e12]:
+          - menuitem "灵感" [ref=e13] [cursor=pointer]:
+            - generic [ref=e20]: 灵感
+          - menuitem "生成" [ref=e21] [cursor=pointer]:
+            - generic [ref=e28]: 生成
+          - menuitem "资产" [ref=e29] [cursor=pointer]:
+            - generic [ref=e36]: 资产
+          - menuitem "画布" [ref=e37] [cursor=pointer]:
+            - generic [ref=e44]: 画布
+      - menu [ref=e45]:
+        - generic [ref=e46]:
+          - menuitem
+          - menuitem [ref=e47] [cursor=pointer]:
+            - img [ref=e51]
+          - menuitem [ref=e53] [cursor=pointer]
+          - menuitem [ref=e60] [cursor=pointer]
+          - menuitem [ref=e67] [cursor=pointer]
+    - img [ref=e79]
+  - generic [ref=e82]:
+    - generic [ref=e86]:
+      - generic [ref=e87]:
+        - menu [ref=e88]:
+          - menuitem "logo" [ref=e90] [cursor=pointer]:
+            - img "logo" [ref=e92]
+        - menu [ref=e93]:
+          - generic [ref=e94]:
+            - menuitem "灵感" [ref=e95] [cursor=pointer]:
+              - generic [ref=e102]: 灵感
+            - menuitem "生成" [ref=e103] [cursor=pointer]:
+              - generic [ref=e110]: 生成
+            - menuitem "资产" [ref=e111] [cursor=pointer]:
+              - generic [ref=e118]: 资产
+            - menuitem "画布" [ref=e119] [cursor=pointer]:
+              - generic [ref=e126]: 画布
+        - menu [ref=e127]:
+          - generic [ref=e128]:
+            - menuitem
+            - menuitem [ref=e129] [cursor=pointer]:
+              - img [ref=e134]
+            - menuitem [ref=e135] [cursor=pointer]
+            - menuitem [ref=e142] [cursor=pointer]
+            - menuitem [ref=e149] [cursor=pointer]
+      - generic [ref=e160]:
+        - generic [ref=e161]:
+          - generic [ref=e163]:
+            - generic [ref=e164]:
+              - text: 开启你的
+              - generic [ref=e165] [cursor=pointer]: Agent 模式
+              - text: 即刻造梦！
+            - generic [ref=e169]:
+              - textbox "Seedance 2.0 全能参考，视频创意无限可能" [ref=e180]
+              - generic [ref=e181]:
+                - generic [ref=e183]:
+                  - button "Agent 模式" [ref=e184] [cursor=pointer]:
+                    - generic [ref=e187]: Agent 模式
+                  - button "自动" [ref=e190] [cursor=pointer]:
+                    - generic [ref=e193]: 自动
+                - button [disabled] [ref=e196]
+          - generic [ref=e225]:
+            - generic [ref=e227]:
+              - generic [ref=e229]:
+                - tab "发现" [selected] [ref=e230] [cursor=pointer]:
+                  - generic [ref=e232]: 发现
+                - tab "短片" [ref=e233] [cursor=pointer]:
+                  - generic [ref=e235]: 短片
+                - tab "活动" [ref=e236] [cursor=pointer]:
+                  - generic [ref=e238]: 活动
+              - textbox [ref=e253]
+            - tabpanel "发现" [ref=e256]
+        - generic [ref=e267]:
+          - generic [ref=e268]:
+            - textbox "Seedance 2.0 全能参考，视频创意无限可能" [ref=e278]
+            - button [disabled] [ref=e279]
+          - generic [ref=e284]:
+            - button "Agent 模式" [ref=e285] [cursor=pointer]:
+              - generic [ref=e288]: Agent 模式
+            - button "自动" [ref=e291] [cursor=pointer]:
+              - generic [ref=e294]: 自动
+    - status [ref=e298]

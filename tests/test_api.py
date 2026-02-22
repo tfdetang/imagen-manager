@@ -79,6 +79,107 @@ async def test_generate_with_invalid_n():
 
 
 @pytest.mark.asyncio
+async def test_video_generate_without_auth():
+    """Test video generation endpoint requires authentication."""
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/videos/generations", json={"prompt": "test"}
+        )
+        assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_video_generate_with_invalid_n():
+    """Test video generation endpoint validates n parameter."""
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/videos/generations",
+            json={"prompt": "test", "n": 2},
+            headers={"Authorization": "Bearer sk-test-key"},
+        )
+        assert response.status_code in [400, 401]
+
+
+@pytest.mark.asyncio
+async def test_video_task_create_requires_auth():
+    """Test async video task creation requires authentication."""
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v2/videos/generations",
+            json={
+                "prompt": "dance",
+                "model": "doubao-seedance-1-0-lite-i2v-250428",
+                "images": ["https://example.com/a.png"],
+            },
+        )
+        assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_video_task_create_validation_shape():
+    """Test async video task create endpoint basic validation/auth flow."""
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v2/videos/generations",
+            json={
+                "prompt": "dance",
+                "model": "doubao-seedance-1-0-lite-i2v-250428",
+                "images": ["https://example.com/a.png"],
+            },
+            headers={"Authorization": "Bearer sk-test-key"},
+        )
+        assert response.status_code in [200, 401]
+        if response.status_code == 200:
+            data = response.json()
+            assert "id" in data
+            assert data["status"] in ["queued", "processing", "succeeded", "failed"]
+
+
+@pytest.mark.asyncio
+async def test_video_task_get_not_found_or_auth():
+    """Test async video task query endpoint auth/not-found behavior."""
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get(
+            "/v2/videos/generations/vtask_not_exist",
+            headers={"Authorization": "Bearer sk-test-key"},
+        )
+        assert response.status_code in [401, 404]
+
+
+@pytest.mark.asyncio
+async def test_video_task_assets_requires_auth():
+    """Test video task assets endpoint requires authentication."""
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get("/v2/videos/generations/vtask_x/assets")
+        assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_video_task_assets_not_found_or_not_bound_or_auth():
+    """Test video task assets endpoint basic behavior."""
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get(
+            "/v2/videos/generations/vtask_not_exist/assets",
+            headers={"Authorization": "Bearer sk-test-key"},
+        )
+        assert response.status_code in [401, 404, 409]
+
+
+@pytest.mark.asyncio
 async def test_edit_endpoint_requires_image():
     """Test edit endpoint requires image file."""
     async with AsyncClient(

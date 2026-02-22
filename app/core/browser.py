@@ -102,6 +102,18 @@ class CookieManager:
 
         return self._cookies_cache
 
+    def load_cookies_for_domains(self, domain_keywords: list[str]) -> list[dict[str, Any]]:
+        """Load and convert cookies filtered by provided domain keywords."""
+        raw_cookies = self._load_raw_cookies()
+        if raw_cookies is None:
+            raise FileNotFoundError(
+                f"Cookies file not found. Please provide either:\n"
+                f"  - {self.cookies_path.parent}/cookies.txt\n"
+                f"  - {self.cookies_path}"
+            )
+
+        return self._convert_cookies(raw_cookies, domain_keywords=domain_keywords)
+
     def _find_cookies_file(self) -> Path | None:
         """Auto-detect cookies file (cookies.txt or cookies.json)."""
         # Prefer configured path when using per-account cookie files.
@@ -119,14 +131,20 @@ class CookieManager:
 
         return None
 
-    def _convert_cookies(self, raw_cookies: list[dict]) -> list[dict[str, Any]]:
+    def _convert_cookies(
+        self,
+        raw_cookies: list[dict],
+        domain_keywords: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
         """Convert browser export format to Playwright format."""
         playwright_cookies = []
+        allowed_keywords = [item.lower() for item in domain_keywords] if domain_keywords else ["google.com", "gemini.google"]
 
         for c in raw_cookies:
-            domain = c.get("domain", "")
-            # Only keep Google/Gemini cookies
-            if not any(x in domain for x in ["google.com", "gemini.google"]):
+            domain = str(c.get("domain", ""))
+            # Keep cookies that match requested domain keywords
+            normalized_domain = domain.lower()
+            if not any(keyword in normalized_domain for keyword in allowed_keywords):
                 continue
 
             # Normalize sameSite

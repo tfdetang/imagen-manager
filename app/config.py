@@ -17,11 +17,13 @@ class Settings(BaseSettings):
 
     # Generation Configuration
     default_timeout: int = 120  # Increased for polling mechanism
+    video_timeout: int = 1800
     proxy: str | None = "http://127.0.0.1:7897"
     use_proxy: bool = True
 
     # Storage Configuration
     storage_dir: Path = Path("./static/generated")
+    video_tasks_path: Path = Path("./data/video_tasks.json")
     cleanup_hours: int = 24
 
     # Cookie Configuration
