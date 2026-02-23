@@ -7,6 +7,8 @@ import tempfile
 import time
 from pathlib import Path
 from typing import List
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 from fastapi import APIRouter, Depends, File, Form, UploadFile, HTTPException
 
 from app.auth import verify_api_key
@@ -27,7 +29,7 @@ from app.models import (
 from app.core.browser import CookieManager
 from app.core.account_pool import AccountPool
 from app.core.semaphore import ConcurrencyManager
-from app.core.video_generator import JimengVideoGenerator, VideoGenerationResult
+from app.core.video_generator import JimengVideoGenerator, VideoGenerationResult, VideoSubmitOptions
 from app.core.video_tasks import VideoTaskManager, VideoTaskProcessResult
 from app.utils.storage import ImageStorage
 from app.config import settings
@@ -89,6 +91,72 @@ def _normalize_account_id(raw_value: str | None) -> str:
         )
 
     return value
+
+
+def _guess_temp_suffix(remote_url: str, default_suffix: str) -> str:
+    parsed = urlparse(remote_url)
+    suffix = Path(parsed.path).suffix.lower()
+    if suffix and 1 < len(suffix) <= 8:
+        return suffix
+    return default_suffix
+
+
+async def _download_remote_to_temp(remote_url: str, default_suffix: str) -> Path:
+    """Download remote file to local temp path for browser upload."""
+
+    def _download() -> Path:
+        suffix = _guess_temp_suffix(remote_url, default_suffix)
+        fd, temp_path = tempfile.mkstemp(prefix="jimeng_ref_", suffix=suffix)
+        os.close(fd)
+        path = Path(temp_path)
+        req = Request(remote_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen(req, timeout=120) as resp:
+            data = resp.read()
+        path.write_bytes(data)
+        return path
+
+    return await asyncio.to_thread(_download)
+
+
+async def _prepare_video_reference_files(
+    image_urls: list[str] | None,
+    video_urls: list[str] | None,
+    first_frame_url: str | None,
+    last_frame_url: str | None,
+) -> tuple[list[Path], list[Path], Path | None, Path | None]:
+    """Resolve remote reference URLs to local temp files."""
+    image_urls = [item for item in (image_urls or []) if item]
+    video_urls = [item for item in (video_urls or []) if item]
+
+    image_paths: list[Path] = []
+    video_paths: list[Path] = []
+    first_frame_path: Path | None = None
+    last_frame_path: Path | None = None
+
+    for image_url in image_urls:
+        image_paths.append(await _download_remote_to_temp(image_url, ".jpg"))
+
+    for video_url in video_urls:
+        video_paths.append(await _download_remote_to_temp(video_url, ".mp4"))
+
+    if first_frame_url:
+        first_frame_path = await _download_remote_to_temp(first_frame_url, ".jpg")
+    if last_frame_url:
+        last_frame_path = await _download_remote_to_temp(last_frame_url, ".jpg")
+
+    return image_paths, video_paths, first_frame_path, last_frame_path
+
+
+def _cleanup_temp_paths(*paths: Path | None):
+    """Best-effort cleanup for temporary local files."""
+    for path in paths:
+        if not path:
+            continue
+        try:
+            if path.exists():
+                path.unlink()
+        except Exception:
+            continue
 
 
 async def _generate_with_account_pool(
@@ -174,6 +242,11 @@ async def _generate_video_with_account_pool(
     prompt: str,
     timeout: int,
     on_binding=None,
+    submit_options: VideoSubmitOptions | None = None,
+    reference_images: list[Path] | None = None,
+    reference_videos: list[Path] | None = None,
+    first_frame_image: Path | None = None,
+    last_frame_image: Path | None = None,
 ) -> VideoGenerationResult:
     """Generate Jimeng video with account failover on cookie-expired errors."""
     stats = account_pool.stats()
@@ -228,6 +301,11 @@ async def _generate_video_with_account_pool(
                 prompt=prompt,
                 timeout=timeout,
                 on_binding=on_binding,
+                submit_options=submit_options,
+                reference_images=reference_images,
+                reference_videos=reference_videos,
+                first_frame_image=first_frame_image,
+                last_frame_image=last_frame_image,
             )
             return generation_result
         except HTTPException as exc:
@@ -267,11 +345,32 @@ async def _process_video_task_request(
 ) -> VideoTaskProcessResult:
     """Background processor for async video generation task."""
     await concurrency_manager.acquire()
+    image_paths: list[Path] = []
+    video_paths: list[Path] = []
+    first_frame_path: Path | None = None
+    last_frame_path: Path | None = None
     try:
+        image_paths, video_paths, first_frame_path, last_frame_path = await _prepare_video_reference_files(
+            image_urls=request.images,
+            video_urls=request.reference_videos,
+            first_frame_url=request.first_frame_image,
+            last_frame_url=request.last_frame_image,
+        )
+
         generation_result = await _generate_video_with_account_pool(
             prompt=request.prompt,
             timeout=max(settings.default_timeout, settings.video_timeout),
             on_binding=on_binding,
+            submit_options=VideoSubmitOptions(
+                model=request.model or "seedance-2.0",
+                reference_mode=request.reference_mode or "omni",
+                ratio=request.ratio or "16:9",
+                duration=request.duration or 5,
+            ),
+            reference_images=image_paths,
+            reference_videos=video_paths,
+            first_frame_image=first_frame_path,
+            last_frame_image=last_frame_path,
         )
         url, _ = storage.save_file(generation_result.media_path, prefix="vid")
         return VideoTaskProcessResult(
@@ -281,6 +380,11 @@ async def _process_video_task_request(
             provider_generate_id=generation_result.provider_generate_id,
         )
     finally:
+        for temp_path in image_paths:
+            _cleanup_temp_paths(temp_path)
+        for temp_path in video_paths:
+            _cleanup_temp_paths(temp_path)
+        _cleanup_temp_paths(first_frame_path, last_frame_path)
         concurrency_manager.release()
 
 
@@ -367,11 +471,32 @@ async def generate_video(
         )
 
     await concurrency_manager.acquire()
+    image_paths: list[Path] = []
+    video_paths: list[Path] = []
+    first_frame_path: Path | None = None
+    last_frame_path: Path | None = None
 
     try:
+        image_paths, video_paths, first_frame_path, last_frame_path = await _prepare_video_reference_files(
+            image_urls=request.images,
+            video_urls=request.reference_videos,
+            first_frame_url=request.first_frame_image,
+            last_frame_url=request.last_frame_image,
+        )
+
         generation_result = await _generate_video_with_account_pool(
             prompt=request.prompt,
             timeout=max(settings.default_timeout, settings.video_timeout),
+            submit_options=VideoSubmitOptions(
+                model=request.model or "seedance-2.0",
+                reference_mode=request.reference_mode or "omni",
+                ratio=request.ratio or "16:9",
+                duration=request.duration or 5,
+            ),
+            reference_images=image_paths,
+            reference_videos=video_paths,
+            first_frame_image=first_frame_path,
+            last_frame_image=last_frame_path,
         )
 
         url, _ = storage.save_file(generation_result.media_path, prefix="vid")
@@ -381,6 +506,11 @@ async def generate_video(
             data=[VideoData(url=url)],
         )
     finally:
+        for temp_path in image_paths:
+            _cleanup_temp_paths(temp_path)
+        for temp_path in video_paths:
+            _cleanup_temp_paths(temp_path)
+        _cleanup_temp_paths(first_frame_path, last_frame_path)
         concurrency_manager.release()
 
 

@@ -1,5 +1,5 @@
 """API request and response models (OpenAI compatible)."""
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Literal
 
 
@@ -38,6 +38,76 @@ class GenerateVideoRequest(BaseModel):
     response_format: Literal["url"] = Field(
         "url", description="Format of response (only 'url' supported)"
     )
+    model: Literal[
+        "seedance-2.0-fast",
+        "seedance-2.0",
+        "video-3.5-pro",
+        "video-3.0-pro",
+        "video-3.0-fast",
+        "video-3.0",
+        "doubao-seedance-1-0-lite-i2v-250428",
+        "doubao-seedance-1-0-lite-i2v-first-last-frame-250428",
+        "doubao-seedance-1-0-lite-i2v-reference-250428",
+    ] | None = Field(
+        "seedance-2.0",
+        description="Video model in Jimeng UI",
+    )
+    reference_mode: Literal["omni", "first_last_frame", "multi_frame", "subject"] | None = Field(
+        "omni",
+        description="Reference mode in Jimeng UI",
+    )
+    ratio: Literal["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"] | None = Field(
+        "16:9",
+        description="Video aspect ratio in Jimeng UI",
+    )
+    duration: int | None = Field(
+        5,
+        ge=4,
+        le=10,
+        description="Video duration in seconds in Jimeng UI",
+    )
+    images: list[str] | None = Field(
+        None,
+        description="Reference image URLs",
+    )
+    reference_videos: list[str] | None = Field(
+        None,
+        description="Reference video URLs",
+    )
+    first_frame_image: str | None = Field(
+        None,
+        description="First frame image URL for first/last frame mode",
+    )
+    last_frame_image: str | None = Field(
+        None,
+        description="Last frame image URL for first/last frame mode",
+    )
+
+    @model_validator(mode="after")
+    def validate_reference_inputs(self):
+        images = [item for item in (self.images or []) if item]
+        videos = [item for item in (self.reference_videos or []) if item]
+        first_frame = bool(self.first_frame_image)
+        last_frame = bool(self.last_frame_image)
+
+        if len(images) > 5:
+            raise ValueError("images supports up to 5 urls")
+        if len(videos) > 5:
+            raise ValueError("reference_videos supports up to 5 urls")
+
+        total_refs = len(images) + len(videos) + int(first_frame) + int(last_frame)
+        if total_refs > 5:
+            raise ValueError("total reference assets cannot exceed 5")
+
+        if self.reference_mode == "first_last_frame":
+            has_pair = first_frame and last_frame
+            has_two_images = len(images) >= 2
+            if not has_pair and not has_two_images:
+                raise ValueError(
+                    "first_last_frame mode requires first_frame_image+last_frame_image, "
+                    "or at least two images"
+                )
+        return self
 
     class Config:
         json_schema_extra = {
@@ -59,20 +129,27 @@ class GenerateVideoTaskRequest(BaseModel):
         max_length=800,
     )
     model: Literal[
+        "seedance-2.0-fast",
+        "seedance-2.0",
+        "video-3.5-pro",
+        "video-3.0-pro",
+        "video-3.0-fast",
+        "video-3.0",
         "doubao-seedance-1-0-lite-i2v-250428",
         "doubao-seedance-1-0-lite-i2v-first-last-frame-250428",
         "doubao-seedance-1-0-lite-i2v-reference-250428",
-    ] = Field(
-        ...,
-        description="Model name",
+    ] | None = Field(
+        "seedance-2.0",
+        description="Model name in Jimeng UI",
     )
-    images: list[str] = Field(
-        ...,
+    images: list[str] | None = Field(
+        None,
         description="Reference image URLs",
-        min_length=1,
     )
-    duration: Literal[5, 10] | None = Field(
+    duration: int | None = Field(
         5,
+        ge=4,
+        le=10,
         description="Video duration in seconds",
     )
     resolution: Literal["480p", "720p", "1080p"] | None = Field(
@@ -82,6 +159,22 @@ class GenerateVideoTaskRequest(BaseModel):
     ratio: Literal["21:9", "16:9", "4:3", "1:1", "3:4", "9:16", "9:21", "keep_ratio", "adaptive"] | None = Field(
         None,
         description="Video aspect ratio",
+    )
+    reference_mode: Literal["omni", "first_last_frame", "multi_frame", "subject"] | None = Field(
+        "omni",
+        description="Reference mode in Jimeng UI",
+    )
+    reference_videos: list[str] | None = Field(
+        None,
+        description="Reference video URLs",
+    )
+    first_frame_image: str | None = Field(
+        None,
+        description="First frame image URL for first/last frame mode",
+    )
+    last_frame_image: str | None = Field(
+        None,
+        description="Last frame image URL for first/last frame mode",
     )
     watermark: bool | None = Field(None, description="Add watermark")
     seed: int | None = Field(
@@ -93,6 +186,32 @@ class GenerateVideoTaskRequest(BaseModel):
     camerafixed: bool | None = Field(None, description="Fix camera")
     return_last_frame: bool | None = Field(None, description="Return last frame")
     generate_audio: bool | None = Field(None, description="Generate audio")
+
+    @model_validator(mode="after")
+    def validate_reference_inputs(self):
+        images = [item for item in (self.images or []) if item]
+        videos = [item for item in (self.reference_videos or []) if item]
+        first_frame = bool(self.first_frame_image)
+        last_frame = bool(self.last_frame_image)
+
+        if len(images) > 5:
+            raise ValueError("images supports up to 5 urls")
+        if len(videos) > 5:
+            raise ValueError("reference_videos supports up to 5 urls")
+
+        total_refs = len(images) + len(videos) + int(first_frame) + int(last_frame)
+        if total_refs > 5:
+            raise ValueError("total reference assets cannot exceed 5")
+
+        if self.reference_mode == "first_last_frame":
+            has_pair = first_frame and last_frame
+            has_two_images = len(images) >= 2
+            if not has_pair and not has_two_images:
+                raise ValueError(
+                    "first_last_frame mode requires first_frame_image+last_frame_image, "
+                    "or at least two images"
+                )
+        return self
 
 
 class EditImageRequest(BaseModel):

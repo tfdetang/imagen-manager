@@ -111,3 +111,37 @@ def test_select_primary_video_url_prefers_higher_bitrate():
     ]
     selected = gen._select_primary_video_url(urls)
     assert selected == urls[2]
+
+
+def test_model_label_supports_legacy_model_id():
+    gen = _generator()
+    assert gen._model_label("doubao-seedance-1-0-lite-i2v-250428") == "Seedance 2.0"
+
+
+def test_reference_ratio_duration_have_safe_defaults():
+    gen = _generator()
+    assert gen._reference_mode_label("unknown-mode") == "全能参考"
+    assert gen._ratio_label("keep_ratio") == "16:9"
+    assert gen._duration_value(99) == 5
+
+
+def test_compose_prompt_adds_first_last_frame_guidance():
+    gen = _generator()
+    result = gen._compose_prompt(
+        prompt="角色跳舞",
+        reference_mode="first_last_frame",
+        uploaded_image_count=2,
+    )
+    assert "作为首帧" in result
+    assert "作为尾帧" in result
+    assert "角色跳舞" in result
+
+
+def test_compose_prompt_keeps_original_for_other_modes():
+    gen = _generator()
+    result = gen._compose_prompt(
+        prompt="角色跳舞",
+        reference_mode="omni",
+        uploaded_image_count=3,
+    )
+    assert result == "角色跳舞"

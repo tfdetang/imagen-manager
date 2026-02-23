@@ -193,7 +193,15 @@ Generate video from text prompt using Jimeng.
 {
   "prompt": "A panda dancing in the snow, cinematic lighting",
   "n": 1,
-  "response_format": "url"
+  "response_format": "url",
+  "model": "seedance-2.0",
+  "reference_mode": "omni",
+  "ratio": "16:9",
+  "duration": 5,
+  "images": ["https://example.com/ref-1.jpg"],
+  "reference_videos": ["https://example.com/ref-motion.mp4"],
+  "first_frame_image": "https://example.com/first.jpg",
+  "last_frame_image": "https://example.com/last.jpg"
 }
 ```
 
@@ -201,17 +209,25 @@ Generate video from text prompt using Jimeng.
 
 Create async video generation task.
 
+Validation notes:
+- Total reference assets (`images` + `reference_videos` + `first_frame_image` + `last_frame_image`) must be <= 5.
+- `reference_mode=first_last_frame` requires either:
+  - both `first_frame_image` and `last_frame_image`, or
+  - at least two `images`.
+
 **Request:**
 ```json
 {
   "prompt": "dance",
-  "model": "doubao-seedance-1-0-lite-i2v-250428",
-  "images": [
-    "https://webstatic.aiproxy.vip/dist/demo.jpg"
-  ],
+  "model": "seedance-2.0",
+  "reference_mode": "omni",
   "duration": 5,
   "resolution": "720p",
-  "ratio": "16:9"
+  "ratio": "16:9",
+  "images": ["https://example.com/ref-1.jpg"],
+  "reference_videos": ["https://example.com/ref-motion.mp4"],
+  "first_frame_image": "https://example.com/first.jpg",
+  "last_frame_image": "https://example.com/last.jpg"
 }
 ```
 

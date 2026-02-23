@@ -27,6 +27,16 @@ class VideoGenerationResult:
     provider_generate_id: str | None = None
 
 
+@dataclass(frozen=True)
+class VideoSubmitOptions:
+    """UI-selectable options for Jimeng video generation."""
+
+    model: str = "seedance-2.0"
+    reference_mode: str = "omni"
+    ratio: str = "16:9"
+    duration: int = 5
+
+
 class JimengVideoGenerator:
     """Handles Jimeng video generation via browser automation."""
 
@@ -40,6 +50,26 @@ class JimengVideoGenerator:
         "https://jimeng.jianying.com/mweb/v1/get_asset_list"
         "?aid=513695&web_version=7.5.0&da_version=3.3.9&aigc_features=app_lip_sync"
     )
+    MODEL_LABELS = {
+        "seedance-2.0-fast": "Seedance 2.0 Fast",
+        "seedance-2.0": "Seedance 2.0",
+        "video-3.5-pro": "视频 3.5 Pro",
+        "video-3.0-pro": "视频 3.0 Pro",
+        "video-3.0-fast": "视频 3.0 Fast",
+        "video-3.0": "视频 3.0",
+        # Backward-compat aliases from previous API shape.
+        "doubao-seedance-1-0-lite-i2v-250428": "Seedance 2.0",
+        "doubao-seedance-1-0-lite-i2v-first-last-frame-250428": "Seedance 2.0",
+        "doubao-seedance-1-0-lite-i2v-reference-250428": "Seedance 2.0",
+    }
+    REFERENCE_MODE_LABELS = {
+        "omni": "全能参考",
+        "first_last_frame": "首尾帧",
+        "multi_frame": "智能多帧",
+        "subject": "主体参考",
+    }
+    RATIO_LABELS = {"21:9", "16:9", "4:3", "1:1", "3:4", "9:16"}
+    DURATION_LABELS = {4, 5, 6, 7, 8, 9, 10}
 
     def __init__(self, cookie_manager: CookieManager, proxy: str | None = None):
         self.cookie_manager = cookie_manager
@@ -50,6 +80,11 @@ class JimengVideoGenerator:
         prompt: str,
         timeout: int = 180,
         on_binding: Callable[[str, list[str] | None, str | None], Awaitable[None] | None] | None = None,
+        submit_options: VideoSubmitOptions | None = None,
+        reference_images: list[Path] | None = None,
+        reference_videos: list[Path] | None = None,
+        first_frame_image: Path | None = None,
+        last_frame_image: Path | None = None,
     ) -> VideoGenerationResult:
         """Generate one video in Jimeng and return local temp file path + provider ids."""
         try:
@@ -101,7 +136,15 @@ class JimengVideoGenerator:
 
                 await self._verify_login(page)
                 baseline_candidates = set(await self._extract_video_candidates(page))
-                await self._submit_prompt(page, prompt)
+                await self._submit_prompt(
+                    page,
+                    prompt,
+                    submit_options=submit_options or VideoSubmitOptions(),
+                    reference_images=reference_images or [],
+                    reference_videos=reference_videos or [],
+                    first_frame_image=first_frame_image,
+                    last_frame_image=last_frame_image,
+                )
                 await self._wait_for_binding(binding_event, timeout=90)
                 submit_id = self._as_optional_str(binding.get("submit_id"))
                 item_ids = self._as_optional_str_list(binding.get("pre_gen_item_ids"))
@@ -182,9 +225,33 @@ class JimengVideoGenerator:
             except Exception:
                 continue
 
-    async def _submit_prompt(self, page: Page, prompt: str):
+    async def _submit_prompt(
+        self,
+        page: Page,
+        prompt: str,
+        submit_options: VideoSubmitOptions,
+        reference_images: list[Path],
+        reference_videos: list[Path],
+        first_frame_image: Path | None,
+        last_frame_image: Path | None,
+    ):
         """Fill prompt and click generate."""
         await self._dismiss_blocking_modal(page)
+        await self._apply_submit_options(page, submit_options)
+        uploaded_image_count = await self._upload_reference_assets(
+            page=page,
+            submit_options=submit_options,
+            reference_images=reference_images,
+            reference_videos=reference_videos,
+            first_frame_image=first_frame_image,
+            last_frame_image=last_frame_image,
+        )
+
+        final_prompt = self._compose_prompt(
+            prompt=prompt,
+            reference_mode=submit_options.reference_mode,
+            uploaded_image_count=uploaded_image_count,
+        )
 
         input_selectors = [
             "textarea",
@@ -219,9 +286,9 @@ class JimengVideoGenerator:
             await input_node.click(force=True)
         tag_name = (await input_node.evaluate("node => node.tagName")).lower()
         if tag_name == "textarea":
-            await input_node.fill(prompt)
+            await input_node.fill(final_prompt)
         else:
-            await page.keyboard.type(prompt, delay=30)
+            await page.keyboard.type(final_prompt, delay=30)
 
         generate_selectors = [
             'button:has-text("生成视频")',
@@ -244,6 +311,359 @@ class JimengVideoGenerator:
 
         # Some Jimeng variants submit by Enter and render icon-only send controls.
         await input_node.press("Enter")
+
+    def _compose_prompt(self, prompt: str, reference_mode: str | None, uploaded_image_count: int) -> str:
+        """Compose final prompt with optional first/last frame guidance."""
+        if reference_mode == "first_last_frame" and uploaded_image_count >= 2:
+            return f"请将@图片1作为首帧，@图片2作为尾帧。{prompt}"
+        return prompt
+
+    async def _upload_reference_assets(
+        self,
+        page: Page,
+        submit_options: VideoSubmitOptions,
+        reference_images: list[Path],
+        reference_videos: list[Path],
+        first_frame_image: Path | None,
+        last_frame_image: Path | None,
+    ) -> int:
+        """Upload reference files and return uploaded image count."""
+        uploaded_image_count = 0
+
+        # In first/last mode, try slot-specific upload first.
+        if submit_options.reference_mode == "first_last_frame":
+            if first_frame_image and await self._upload_frame_slot(page, "首帧", first_frame_image):
+                if self._is_image_path(first_frame_image):
+                    uploaded_image_count += 1
+                first_frame_image = None
+
+            if last_frame_image and await self._upload_frame_slot(page, "尾帧", last_frame_image):
+                if self._is_image_path(last_frame_image):
+                    uploaded_image_count += 1
+                last_frame_image = None
+
+        upload_queue: list[Path] = []
+        if first_frame_image:
+            upload_queue.append(first_frame_image)
+        if last_frame_image:
+            upload_queue.append(last_frame_image)
+        upload_queue.extend(reference_images)
+        upload_queue.extend(reference_videos)
+
+        if upload_queue and await self._upload_files(page, upload_queue):
+            for path in upload_queue:
+                if self._is_image_path(path):
+                    uploaded_image_count += 1
+
+        return uploaded_image_count
+
+    def _is_image_path(self, path: Path) -> bool:
+        return path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
+    async def _upload_files(self, page: Page, files: list[Path]) -> bool:
+        """Upload one batch of files through available file-input controls."""
+        existing = [path for path in files if path and path.exists()]
+        if not existing:
+            return False
+
+        try:
+            file_inputs = await page.query_selector_all('input[type="file"]')
+        except Exception:
+            file_inputs = []
+
+        if file_inputs:
+            for file_input in file_inputs:
+                try:
+                    await file_input.set_input_files([str(path) for path in existing])
+                    await asyncio.sleep(2)
+                    return True
+                except Exception:
+                    continue
+
+        trigger_selectors = [
+            'button:has-text("参考内容")',
+            'div:has-text("参考内容")',
+            'button:has-text("上传")',
+            'button:has-text("Upload")',
+            'button[aria-label*="upload" i]',
+            'button[class*="upload" i]',
+        ]
+
+        for selector in trigger_selectors:
+            try:
+                trigger = await page.query_selector(selector)
+                if not trigger or not await trigger.is_visible():
+                    continue
+                async with page.expect_file_chooser(timeout=8000) as chooser_info:
+                    await trigger.click(force=True)
+                chooser = await chooser_info.value
+                await chooser.set_files([str(path) for path in existing])
+                await asyncio.sleep(2)
+                return True
+            except Exception:
+                continue
+
+        logger.warning("Failed to upload reference files: %s", [str(path) for path in existing])
+        return False
+
+    async def _upload_frame_slot(self, page: Page, slot_label: str, file_path: Path) -> bool:
+        """Upload one file by clicking specific frame slot controls."""
+        if not file_path.exists():
+            return False
+
+        label_selectors = [
+            f'button:has-text("{slot_label}")',
+            f'div:has-text("{slot_label}")',
+            f'span:has-text("{slot_label}")',
+            f'text="{slot_label}"',
+        ]
+
+        for selector in label_selectors:
+            try:
+                nodes = await page.query_selector_all(selector)
+            except Exception:
+                continue
+            if not nodes:
+                continue
+
+            for node in reversed(nodes):
+                try:
+                    if not await node.is_visible():
+                        continue
+                    async with page.expect_file_chooser(timeout=4000) as chooser_info:
+                        await node.click(force=True)
+                    chooser = await chooser_info.value
+                    await chooser.set_files(str(file_path))
+                    await asyncio.sleep(1.5)
+                    return True
+                except Exception:
+                    continue
+
+        return False
+
+    async def _apply_submit_options(self, page: Page, submit_options: VideoSubmitOptions):
+        """Apply configurable UI options before submitting prompt."""
+        # Keep the first creation-type option fixed to video generation.
+        await self._open_and_select(
+            page,
+            trigger_texts=["Agent 模式", "图片生成", "视频生成", "数字人", "动作模仿"],
+            option_text="视频生成",
+        )
+
+        await self._open_and_select(
+            page,
+            trigger_texts=[
+                "Seedance 2.0 Fast",
+                "Seedance 2.0",
+                "Seedance",
+                "2.0",
+                "视频 3.5 Pro",
+                "视频 3.0 Pro",
+                "视频 3.0 Fast",
+                "视频 3.0",
+            ],
+            option_text=self._model_label(submit_options.model),
+        )
+
+        await self._open_and_select(
+            page,
+            trigger_texts=["全能参考", "首尾帧", "智能多帧", "主体参考"],
+            option_text=self._reference_mode_label(submit_options.reference_mode),
+        )
+
+        await self._select_ratio(page, self._ratio_label(submit_options.ratio))
+        await self._select_duration(page, f"{self._duration_value(submit_options.duration)}s")
+
+    async def _select_ratio(self, page: Page, ratio: str):
+        await self._open_and_select(
+            page,
+            trigger_texts=["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
+            option_text=ratio,
+        )
+        if await self._option_selected(page, ratio):
+            return
+
+        try:
+            clicked = await page.evaluate(
+                """([target]) => {
+                    const radios = Array.from(document.querySelectorAll('[role="radio"]'));
+                    for (const radio of radios) {
+                        const text = (radio.getAttribute('aria-label') || radio.innerText || '').trim();
+                        if (text === target) {
+                            const clickable = radio.closest('[role="radio"]') || radio.parentElement;
+                            if (clickable) { clickable.click(); return true; }
+                        }
+                    }
+                    const labels = Array.from(document.querySelectorAll('*'))
+                      .filter(n => (n.textContent || '').trim() === target);
+                    for (const node of labels) {
+                        if (node instanceof HTMLElement) {
+                            node.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }""",
+                [ratio],
+            )
+            if clicked:
+                await asyncio.sleep(0.25)
+        except Exception:
+            return
+
+    async def _select_duration(self, page: Page, duration_text: str):
+        await self._open_and_select(
+            page,
+            trigger_texts=["4s", "5s", "6s", "7s", "8s", "9s", "10s"],
+            option_text=duration_text,
+        )
+        if await self._option_selected(page, duration_text):
+            return
+
+        try:
+            clicked = await page.evaluate(
+                """([target]) => {
+                    const options = Array.from(document.querySelectorAll('[role="option"]'));
+                    for (const option of options) {
+                        const text = (option.innerText || option.textContent || '').trim();
+                        if (text === target) {
+                            option.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }""",
+                [duration_text],
+            )
+            if clicked:
+                await asyncio.sleep(0.25)
+        except Exception:
+            return
+
+    async def _open_and_select(self, page: Page, trigger_texts: list[str], option_text: str):
+        """Open one dropdown-like control and select target option text."""
+        if await self._option_selected(page, option_text):
+            return
+
+        opened = False
+        for trigger in trigger_texts:
+            if await self._click_text(page, trigger, prefer_last=True):
+                opened = True
+                await asyncio.sleep(0.25)
+                break
+
+        if not opened:
+            # Fallback: click the last visible combobox to force one selector open.
+            try:
+                comboboxes = await page.query_selector_all('[role="combobox"]')
+            except Exception:
+                comboboxes = []
+            for box in reversed(comboboxes):
+                try:
+                    if not await box.is_visible():
+                        continue
+                    await box.click(timeout=1500)
+                    opened = True
+                    await asyncio.sleep(0.25)
+                    break
+                except Exception:
+                    continue
+            if not opened:
+                if await self._option_selected(page, option_text):
+                    return
+                logger.warning("Failed to open selector for option=%s", option_text)
+                return
+
+        if await self._click_text(page, option_text, prefer_last=True):
+            await asyncio.sleep(0.25)
+            if await self._option_selected(page, option_text):
+                return
+
+        if await self._option_selected(page, option_text):
+            return
+
+        if await self._text_exists(page, option_text):
+            return
+
+        logger.warning("Failed to select option text=%s", option_text)
+
+    async def _option_selected(self, page: Page, option_text: str) -> bool:
+        """Check whether target option already appears in current controls."""
+        try:
+            return await page.evaluate(
+                """([text]) => {
+                    const nodes = Array.from(
+                      document.querySelectorAll('[role="combobox"], button, [class*="select"], [class*="dropdown"]')
+                    );
+                    return nodes.some(node => (node.innerText || '').includes(text));
+                }""",
+                [option_text],
+            )
+        except Exception:
+            return False
+
+    async def _text_exists(self, page: Page, text: str) -> bool:
+        try:
+            return await page.evaluate(
+                """([target]) => (document.body.innerText || '').includes(target)""",
+                [text],
+            )
+        except Exception:
+            return False
+
+    async def _click_text(self, page: Page, text: str, prefer_last: bool) -> bool:
+        """Best-effort click any visible clickable element containing text."""
+        selectors = [
+            f'[role="option"]:has-text("{text}")',
+            f'[role="combobox"]:has-text("{text}")',
+            f'button:has-text("{text}")',
+            f'div[role="button"]:has-text("{text}")',
+            f'[class*="select"]:has-text("{text}")',
+            f'[class*="dropdown"]:has-text("{text}")',
+            f'[class*="option"]:has-text("{text}")',
+            f'text="{text}"',
+        ]
+
+        for selector in selectors:
+            try:
+                nodes = await page.query_selector_all(selector)
+            except Exception:
+                continue
+            if not nodes:
+                continue
+
+            iterable = range(len(nodes) - 1, -1, -1) if prefer_last else range(len(nodes))
+            for idx in iterable:
+                node = nodes[idx]
+                try:
+                    if not await node.is_visible():
+                        continue
+                    await node.click(timeout=1500)
+                    return True
+                except Exception:
+                    continue
+
+        return False
+
+    def _model_label(self, value: str | None) -> str:
+        if not value:
+            return "Seedance 2.0"
+        return self.MODEL_LABELS.get(value, "Seedance 2.0")
+
+    def _reference_mode_label(self, value: str | None) -> str:
+        if not value:
+            return "全能参考"
+        return self.REFERENCE_MODE_LABELS.get(value, "全能参考")
+
+    def _ratio_label(self, value: str | None) -> str:
+        if value in self.RATIO_LABELS:
+            return value
+        return "16:9"
+
+    def _duration_value(self, value: int | None) -> int:
+        if isinstance(value, int) and value in self.DURATION_LABELS:
+            return value
+        return 5
 
     async def _dismiss_blocking_modal(self, page: Page):
         """Best-effort close onboarding/login popups that block interactions."""
