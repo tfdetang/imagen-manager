@@ -649,7 +649,17 @@ class ImageGenerator:
         await asyncio.sleep(min_wait)
         elapsed = min_wait
 
+        poll_count = 0
         while elapsed < timeout:
+            # Take a screenshot on every poll for debugging
+            poll_count += 1
+            try:
+                screenshot_path = f"/tmp/debug_poll_{poll_count:03d}_{elapsed}s_{datetime.now().strftime('%H%M%S')}.png"
+                await page.screenshot(path=screenshot_path)
+                logger.info(f"  📸 Poll screenshot [{poll_count}]: {screenshot_path}")
+            except Exception:
+                pass
+
             # Check for generation complete indicators
             is_ready, reason = await self._check_generation_status(page)
 
