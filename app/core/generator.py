@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import logging
+import random
 import re
 from pathlib import Path
 from datetime import datetime
@@ -230,6 +231,17 @@ class ImageGenerator:
                 };
                 markNative(navigator.permissions.query);
                 markNative(Function.prototype.toString);
+
+                // ── 12. 拦截 visibilitychange / blur 防止 Gemini 取消生成 ──
+                // 阻止 document 上任何 visibilitychange 事件冒泡给 Gemini 的监听器
+                document.addEventListener('visibilitychange', (e) => { e.stopImmediatePropagation(); }, true);
+                // 阻止 window blur（切换标签/失焦）
+                window.addEventListener('blur', (e) => { e.stopImmediatePropagation(); }, true);
+                // 每 10 秒向 document 和 window 重新派发 focus 事件，保持活跃状态
+                setInterval(() => {
+                    try { document.dispatchEvent(new Event('focus')); } catch(_) {}
+                    try { window.dispatchEvent(new Event('focus')); } catch(_) {}
+                }, 10000);
             })();
             """);
 
@@ -855,6 +867,50 @@ class ImageGenerator:
         logger.warning("  ⚠️  Image tool menu item not found")
         return False
 
+    async def _keep_alive_wait(self, page: Page, seconds: float):
+        """
+        Wait for `seconds` while periodically simulating user activity to
+        prevent Gemini from detecting an idle/background tab and cancelling
+        the ongoing generation.
+
+        Every ~2 s we:
+        - Move the mouse slightly (prevents idle-detection heuristics)
+        - Dispatch a synthetic focus event via JS (reinforces active-tab state)
+        """
+        interval = 2.0
+        spent = 0.0
+
+        # Base coordinates – centre-ish of a 1920×1080 viewport, away from buttons
+        cx, cy = 960, 400
+
+        while spent < seconds:
+            chunk = min(interval, seconds - spent)
+            await asyncio.sleep(chunk)
+            spent += chunk
+
+            # Gentle random mouse jitter (±5 px)
+            nx = cx + random.randint(-5, 5)
+            ny = cy + random.randint(-5, 5)
+            try:
+                await page.mouse.move(nx, ny)
+            except Exception:
+                pass
+
+            # Re-dispatch focus / visibilitychange via JS to keep Gemini happy
+            try:
+                await page.evaluate("""() => {
+                    try { document.dispatchEvent(new Event('focus')); } catch(_) {}
+                    try { window.dispatchEvent(new Event('focus')); } catch(_) {}
+                    try {
+                        Object.defineProperty(document, 'hidden',
+                            {get: () => false, configurable: true});
+                        Object.defineProperty(document, 'visibilityState',
+                            {get: () => 'visible', configurable: true});
+                    } catch(_) {}
+                }""")
+            except Exception:
+                pass
+
     async def _is_page_idle(self, page: Page) -> bool:
         """
         Check if the page has silently jumped back to idle input mode
@@ -998,12 +1054,12 @@ class ImageGenerator:
                     return False
             # ─────────────────────────────────────────────────────────────────
 
-            # Wait before next poll
+            # Wait before next poll – simulate user activity to prevent idle detection
             remaining = timeout - elapsed
             wait_time = min(poll_interval, remaining)
             if wait_time > 0:
                 logger.info(f"  ⏳ Polling... ({elapsed}s/{timeout}s elapsed)")
-                await asyncio.sleep(wait_time)
+                await self._keep_alive_wait(page, wait_time)
                 elapsed += wait_time
 
         logger.warning(f"  ⚠️  Timeout reached ({timeout}s) without detecting completion")
