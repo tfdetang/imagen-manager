@@ -300,7 +300,11 @@ class ImageGenerator:
 
                 # Wait for generation with polling
                 logger.info(f"⏳ Waiting for image generation (max {timeout}s)...")
-                generation_ready = await self._wait_for_generation(page, timeout)
+                generation_ready = await self._wait_for_generation(
+                    page, timeout,
+                    reference_images=reference_images,
+                    prompt=prompt,
+                )
 
                 if not generation_ready:
                     logger.warning("⚠️  Generation may not be complete, attempting download anyway...")
@@ -789,15 +793,65 @@ class ImageGenerator:
         logger.warning("  ⚠️  Image tool menu item not found")
         return False
 
-    async def _wait_for_generation(self, page: Page, timeout: int) -> bool:
+    async def _is_page_idle(self, page: Page) -> bool:
+        """
+        Check if the page has silently jumped back to idle input mode
+        (text still in box but attachments gone, no generation in progress).
+
+        Returns True when the page appears to be in ready-to-submit input state
+        with no active generation or loading indicators.
+        """
+        try:
+            # If a stop/cancel button is visible, generation is still running
+            stop_btn = await page.query_selector(
+                'button[aria-label*="stop" i], button[aria-label*="cancel" i]'
+            )
+            if stop_btn and await stop_btn.is_visible():
+                return False
+
+            # If a mat-progress-bar or common loading element is visible, still loading
+            loading_elems = await page.query_selector_all(
+                'mat-progress-bar, [class*="progress-bar"], [class*="loading-spinner"]'
+            )
+            for elem in loading_elems:
+                try:
+                    if await elem.is_visible():
+                        return False
+                except Exception:
+                    pass
+
+            # If an enabled send button is visible, the page is in idle input mode
+            send_btn = await page.query_selector(
+                'button[aria-label*="send" i], button[aria-label*="Send" i]'
+            )
+            if send_btn and await send_btn.is_visible():
+                is_enabled = await send_btn.is_enabled()
+                if is_enabled:
+                    return True
+        except Exception as e:
+            logger.warning(f"  ⚠️  Error during idle-check: {e}")
+
+        return False
+
+    async def _wait_for_generation(
+        self,
+        page: Page,
+        timeout: int,
+        reference_images: list["Path"] | None = None,
+        prompt: str = "",
+    ) -> bool:
         """
         Poll the page to detect when image generation is complete.
+        If the page silently resets to idle input mode mid-generation
+        (text preserved but attachments lost), re-upload and re-submit.
 
         Returns True if generation appears complete, False if timeout reached.
         """
         poll_interval = 5  # Check every 5 seconds
         min_wait = 30  # Minimum wait before first check (generation takes time)
         elapsed = 0
+        max_retries = 3
+        retry_count = 0
 
         # Wait minimum time before starting to poll
         logger.info(f"  ⏳ Initial wait of {min_wait}s before polling...")
@@ -832,6 +886,55 @@ class ImageGenerator:
                 logger.warning(f"  ⚠️  Generation error detected: {error_msg}")
                 # Still return True to attempt download (might have partial result)
                 return True
+
+            # ── Jump-back detection ───────────────────────────────────────────
+            # After the initial wait, check if the page silently reset to idle
+            # input mode (send button enabled, no loading, no results yet).
+            page_is_idle = await self._is_page_idle(page)
+            if page_is_idle:
+                if retry_count < max_retries:
+                    retry_count += 1
+                    logger.warning(
+                        f"  ⚠️  Page jumped back to idle input mode (retry {retry_count}/{max_retries}). "
+                        f"Re-uploading and re-submitting..."
+                    )
+                    # Clear any stale text already in the input box
+                    try:
+                        input_elem = await page.query_selector('div[contenteditable="true"], textarea')
+                        if input_elem:
+                            await input_elem.click()
+                            await page.keyboard.press("Control+A")
+                            await page.keyboard.press("Delete")
+                            await asyncio.sleep(0.5)
+                    except Exception as clear_err:
+                        logger.warning(f"  ⚠️  Could not clear input: {clear_err}")
+
+                    # Re-upload reference images
+                    uploaded_count = 0
+                    if reference_images:
+                        logger.info(f"  📤 Re-uploading {len(reference_images)} reference image(s)...")
+                        for idx, ref_img in enumerate(reference_images):
+                            upload_success = await self._upload_image(page, ref_img)
+                            if upload_success:
+                                uploaded_count += 1
+                            else:
+                                logger.warning(f"  ⚠️  Re-upload failed for image {idx+1}")
+                        logger.info(f"  ✅ Re-uploaded {uploaded_count}/{len(reference_images)} image(s)")
+
+                    # Re-submit the prompt
+                    await self._submit_prompt(page, prompt, uploaded_count > 0)
+                    logger.info("  ✅ Prompt re-submitted after jump-back")
+
+                    # Reset polling clock – give generation another full min_wait
+                    await asyncio.sleep(min_wait)
+                    elapsed += min_wait
+                    continue
+                else:
+                    logger.error(
+                        f"  ❌ Page jumped back {retry_count} times, giving up."
+                    )
+                    return False
+            # ─────────────────────────────────────────────────────────────────
 
             # Wait before next poll
             remaining = timeout - elapsed
