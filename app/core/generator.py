@@ -259,6 +259,14 @@ class ImageGenerator:
                 await self._verify_login(page)
                 logger.info("✅ Login verified successfully")
 
+                # Switch to temporary chat to avoid polluting history
+                logger.info("💬 Switching to temporary chat...")
+                temp_chat_ok = await self._enable_temporary_chat(page)
+                if temp_chat_ok:
+                    logger.info("✅ Temporary chat activated")
+                else:
+                    logger.warning("⚠️  Could not switch to temporary chat, continuing anyway")
+
                 # Ensure image generation tool is selected
                 logger.info("🧰 Ensuring image generation tool is selected...")
                 tool_selected = await self._ensure_image_tool(page)
@@ -631,6 +639,60 @@ class ImageGenerator:
                 continue
 
         logger.warning("  ⚠️  Pro menu item not found in dropdown")
+        return False
+
+    async def _enable_temporary_chat(self, page: Page) -> bool:
+        """
+        Click the "Temporary chat" / "临时对话" toggle button in the Gemini sidebar
+        so that the session is not saved to history.
+
+        The button is the square/dashed-box icon next to the "New chat" entry.
+        Gemini may show a tooltip or badge after clicking to confirm activation.
+        Returns True if activated successfully.
+        """
+        logger.info("  🔍 Looking for Temporary chat button...")
+
+        # Candidate selectors covering English and Chinese UIs & multiple releases
+        selectors = [
+            # aria-label variants (most stable)
+            'button[aria-label*="Temporary chat" i]',
+            'button[aria-label*="临时对话" i]',
+            'button[aria-label*="临时" i]',
+            # text-based variants
+            'button:has-text("Temporary chat")',
+            'button:has-text("临时对话")',
+        ]
+
+        for sel in selectors:
+            try:
+                btn = await page.wait_for_selector(sel, timeout=4000)
+                if btn and await btn.is_visible():
+                    await btn.click()
+                    logger.info(f"  ✅ Clicked temporary chat button via: {sel}")
+                    await asyncio.sleep(1)
+                    return True
+            except Exception:
+                continue
+
+        # Fallback: look for the icon button sitting immediately next to the
+        # "New chat" / "发起新对话" button (they share the same parent row)
+        try:
+            new_chat_btn = await page.query_selector(
+                'a[href="/app"], button:has-text("New chat"), button:has-text("发起新对话")'
+            )
+            if new_chat_btn:
+                # The temporary chat button is typically an adjacent sibling
+                parent = await new_chat_btn.evaluate_handle("el => el.parentElement")
+                sibling_btn = await parent.query_selector("button:not(:has-text(''))")
+                if sibling_btn and await sibling_btn.is_visible():
+                    await sibling_btn.click()
+                    logger.info("  ✅ Clicked temporary chat button via sibling fallback")
+                    await asyncio.sleep(1)
+                    return True
+        except Exception as e:
+            logger.warning(f"  ⚠️  Sibling fallback failed: {e}")
+
+        logger.warning("  ⚠️  Temporary chat button not found")
         return False
 
     async def _ensure_image_tool(self, page: Page) -> bool:
