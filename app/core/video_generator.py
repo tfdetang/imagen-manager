@@ -40,6 +40,13 @@ class VideoSubmitOptions:
 class JimengVideoGenerator:
     """Handles Jimeng video generation via browser automation."""
 
+    DEFAULT_VIEWPORT = {"width": 1920, "height": 1080}
+    DEFAULT_USER_AGENT = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/123.0.0.0 Safari/537.36"
+    )
+
     COOKIE_DOMAINS = [
         "jimeng.jianying.com",
         "jianying.com",
@@ -106,10 +113,27 @@ class JimengVideoGenerator:
         async with async_playwright() as p:
             browser = await self._launch_browser(p)
             context = await browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                viewport=self.DEFAULT_VIEWPORT,
+                user_agent=self.DEFAULT_USER_AGENT,
+                locale="zh-CN",
+                timezone_id="Asia/Shanghai",
+                extra_http_headers={
+                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                },
                 accept_downloads=True,
             )
+            # 注入反自动化检测脚本
+            await context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+                Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en-US', 'en']});
+                window.chrome = {runtime: {}};
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) =>
+                    parameters.name === 'notifications'
+                        ? Promise.resolve({state: Notification.permission})
+                        : originalQuery(parameters);
+            """);
             await context.add_cookies(cookies)
             page = await context.new_page()
             binding: dict[str, object] = {
@@ -180,7 +204,23 @@ class JimengVideoGenerator:
 
     async def _launch_browser(self, playwright) -> Browser:
         """Launch browser with optional proxy."""
-        launch_opts = {"headless": True}
+        launch_opts = {
+            "headless": True,
+            "args": [
+                "--lang=zh-CN",
+                "--window-size=1920,1080",
+                # 反自动化检测
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-gpu",
+                "--disable-features=IsolateOrigins,site-per-process",
+                "--ignore-certificate-errors",
+                "--allow-running-insecure-content",
+            ],
+        }
         if self.proxy:
             launch_opts["proxy"] = {"server": self.proxy}
         return await playwright.chromium.launch(**launch_opts)
@@ -840,10 +880,27 @@ class JimengVideoGenerator:
         async with async_playwright() as p:
             browser = await self._launch_browser(p)
             context = await browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                viewport=self.DEFAULT_VIEWPORT,
+                user_agent=self.DEFAULT_USER_AGENT,
+                locale="zh-CN",
+                timezone_id="Asia/Shanghai",
+                extra_http_headers={
+                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                },
                 accept_downloads=False,
             )
+            # 注入反自动化检测脚本
+            await context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+                Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en-US', 'en']});
+                window.chrome = {runtime: {}};
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) =>
+                    parameters.name === 'notifications'
+                        ? Promise.resolve({state: Notification.permission})
+                        : originalQuery(parameters);
+            """);
             await context.add_cookies(cookies)
             page = await context.new_page()
             try:
