@@ -132,6 +132,14 @@ class ImageGenerator:
                 else:
                     logger.warning("⚠️  Could not confirm image generation tool selection")
 
+                # Switch to Pro mode for best image quality
+                logger.info("⭐ Switching to Pro mode...")
+                pro_selected = await self._ensure_pro_mode(page)
+                if pro_selected:
+                    logger.info("✅ Pro mode activated")
+                else:
+                    logger.warning("⚠️  Could not confirm Pro mode selection, continuing anyway")
+
                 # Upload reference images if provided
                 uploaded_count = 0
                 if reference_images:
@@ -357,6 +365,114 @@ class ImageGenerator:
             logger.warning(f"  ⚠️  WARNING: Could not upload reference image: {image_path}")
 
         return uploaded
+
+    async def _ensure_pro_mode(self, page: Page) -> bool:
+        """Switch the Gemini model to Pro mode.
+
+        The model selector appears as a button labeled with the current model
+        (e.g. "Pro", "Fast", "Thinking", "1.5 Flash", "2.0 Flash").  Clicking
+        it opens a dropdown with at least: Fast / Thinking / Pro.
+        If Pro is already active the method returns True immediately.
+        """
+        pro_regex = re.compile(r"\bPro\b", re.I)
+
+        # -----------------------------------------------------------------------
+        # Step 1: Check whether Pro is already the active model.
+        # The active state is commonly shown as:
+        #   - A button whose text IS "Pro" (with optional chevron)
+        #   - An aria-label containing "Pro" + selected / checked indicator
+        # -----------------------------------------------------------------------
+        already_pro_locators = [
+            # English: button text exactly "Pro" (already selected, no need to open menu)
+            page.locator('button[aria-pressed="true"]:has-text("Pro")'),
+            page.locator('button[aria-selected="true"]:has-text("Pro")'),
+            page.locator('[aria-checked="true"]:has-text("Pro")'),
+            # The model pill/label at the bottom right often just reads "Pro"
+            # If it IS the selector button and reads "Pro", we're already in Pro mode.
+        ]
+        for loc in already_pro_locators:
+            try:
+                if await loc.first.is_visible():
+                    logger.info("  ✅ Already in Pro mode")
+                    return True
+            except Exception:
+                continue
+
+        # -----------------------------------------------------------------------
+        # Step 2: Open the model selector dropdown.
+        # The selector button typically shows the current model name.
+        # Known labels: "Pro", "Fast", "Thinking", "1.5 Flash", "2.0 Flash",
+        #               "Nano Banana Pro", etc.
+        # -----------------------------------------------------------------------
+        model_selector_locators = [
+            # The visible "Pro ▾" or "Fast ▾" button at the bottom-right of the input area
+            page.locator('button:has-text("Pro")').filter(has=page.locator('[class*="chevron"], [class*="arrow"], svg')),
+            page.locator('button:has-text("Fast")'),
+            page.locator('button:has-text("Thinking")'),
+            # Aria label variants
+            page.locator('button[aria-label*="model" i]'),
+            page.locator('button[aria-label*="Model" i]'),
+            page.locator('button[aria-haspopup="listbox"]'),
+            page.locator('button[aria-haspopup="menu"]').filter(has_text=re.compile(r"(Pro|Fast|Thinking|Flash)", re.I)),
+            # Generic: any button that contains one of the known model names
+            page.locator('button').filter(has_text=re.compile(r"^(Pro|Fast|Thinking|1\.5 Flash|2\.0 Flash)$", re.I)),
+        ]
+
+        opened = False
+        for loc in model_selector_locators:
+            try:
+                if await loc.first.is_visible():
+                    logger.info("  🔍 Clicking model selector to open dropdown...")
+                    await loc.first.click()
+                    await asyncio.sleep(1)
+                    opened = True
+                    break
+            except Exception as e:
+                logger.warning(f"  ⚠️  Model selector click failed: {e}")
+                continue
+
+        if not opened:
+            logger.warning("  ⚠️  Could not open model selector")
+            return False
+
+        # Save screenshot for debugging
+        try:
+            screenshot_path = f"/tmp/debug_model_menu_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            await page.screenshot(path=screenshot_path)
+            logger.info(f"  📸 Model menu screenshot: {screenshot_path}")
+        except Exception:
+            pass
+
+        # -----------------------------------------------------------------------
+        # Step 3: Select "Pro" from the open dropdown.
+        # -----------------------------------------------------------------------
+        pro_item_locators = [
+            page.get_by_role("option",           name=pro_regex),
+            page.get_by_role("menuitem",         name=pro_regex),
+            page.get_by_role("menuitemradio",    name=pro_regex),
+            page.get_by_role("menuitemcheckbox", name=pro_regex),
+            page.locator('li[role="option"]:has-text("Pro")'),
+            page.locator('li[role="menuitem"]:has-text("Pro")'),
+            page.locator('div[role="option"]:has-text("Pro")'),
+            page.locator('div[role="menuitem"]:has-text("Pro")'),
+            # Plain text match (last resort)
+            page.locator(':has-text("Pro"):not(:has(*:has-text("Pro")))'),  # leaf node
+        ]
+
+        for loc in pro_item_locators:
+            try:
+                if await loc.first.is_visible():
+                    logger.info("  ⭐ Clicking 'Pro' menu item...")
+                    await loc.first.click()
+                    await asyncio.sleep(1)
+                    logger.info("  ✅ Pro mode selected")
+                    return True
+            except Exception as e:
+                logger.warning(f"  ⚠️  Pro item selector failed: {e}")
+                continue
+
+        logger.warning("  ⚠️  Pro menu item not found in dropdown")
+        return False
 
     async def _ensure_image_tool(self, page: Page) -> bool:
         """Ensure the image generation tool is selected in Gemini UI.
@@ -637,9 +753,9 @@ class ImageGenerator:
         """Enter and submit prompt to Gemini."""
         # Build full prompt
         if has_image:
-            full_prompt = f"基于上传的参考图片，使用 Imagen 3 生成新图片：{prompt}"
+            full_prompt = f"基于上传的参考图片：{prompt}"
         else:
-            full_prompt = f"使用 Imagen 3 生成一张图片：{prompt}"
+            full_prompt = f"{prompt}"
 
         logger.info(f"  ✍️  Full prompt: {full_prompt}")
 
