@@ -359,9 +359,56 @@ class ImageGenerator:
         return uploaded
 
     async def _ensure_image_tool(self, page: Page) -> bool:
-        """Ensure the image generation tool is selected in Gemini UI."""
-        image_tool_regex = re.compile(r"(制作图片|Make images|Create images)", re.I)
+        """Ensure the image generation tool is selected in Gemini UI.
 
+        Supports both English and Chinese Gemini interfaces, and both the new UI
+        (landing-page shortcut pills + "+" menu button) and old UI ("Tools" button).
+        """
+        # Regex covering all known English / Chinese labels for the image tool
+        image_tool_regex = re.compile(
+            r"(Create image|Make image|制作图片|创建图片|Create images|Make images)", re.I
+        )
+
+        # -----------------------------------------------------------------------
+        # Strategy 1: Click the "Create image" shortcut pill on the landing page.
+        # The landing page shows suggestion pills before the user has typed anything.
+        # English UI: "Create image"    Chinese UI: "制作图片" / "创建图片"
+        # The pills may be <button>, <div>, <a>, or custom elements.
+        # -----------------------------------------------------------------------
+        create_image_pill_locators = [
+            # English – role-based (most reliable)
+            page.get_by_role("button", name=re.compile(r"^Create image$", re.I)),
+            page.get_by_role("link",   name=re.compile(r"^Create image$", re.I)),
+            # English – text-based fallbacks
+            page.locator('button:has-text("Create image")'),
+            page.locator('a:has-text("Create image")'),
+            page.locator('[role="option"]:has-text("Create image")'),
+            page.locator('[class*="suggestion"]:has-text("Create image")'),
+            page.locator('[class*="chip"]:has-text("Create image")'),
+            page.locator('[class*="pill"]:has-text("Create image")'),
+            page.locator('*:has-text("Create image"):not(:has(*:has-text("Create image")))'),  # leaf node
+            # Chinese – role-based
+            page.get_by_role("button", name=re.compile(r"^(制作图片|创建图片)$")),
+            # Chinese – text-based fallbacks
+            page.locator('button:has-text("制作图片")'),
+            page.locator('button:has-text("创建图片")'),
+            page.locator('[class*="suggestion"]:has-text("制作图片")'),
+            page.locator('[class*="chip"]:has-text("制作图片")'),
+        ]
+        for loc in create_image_pill_locators:
+            try:
+                if await loc.first.is_visible():
+                    logger.info("  🖼️  Clicking 'Create image' shortcut pill on landing page...")
+                    await loc.first.click()
+                    await asyncio.sleep(2)
+                    logger.info("  ✅ 'Create image' shortcut pill clicked")
+                    return True
+            except Exception:
+                continue
+
+        # -----------------------------------------------------------------------
+        # Strategy 2: Menu is already open — select the image item directly.
+        # -----------------------------------------------------------------------
         async def _menu_item_visible() -> bool:
             try:
                 loc = page.get_by_role("menuitemcheckbox", name=image_tool_regex)
@@ -369,7 +416,6 @@ class ImageGenerator:
             except Exception:
                 return False
 
-        # If the menu is already open, try selecting immediately.
         if await _menu_item_visible():
             try:
                 await page.get_by_role("menuitemcheckbox", name=image_tool_regex).first.click()
@@ -379,20 +425,39 @@ class ImageGenerator:
             except Exception:
                 pass
 
-        # Open tool menu
+        # -----------------------------------------------------------------------
+        # Strategy 3: Open the tools / attachment menu, then select "Create image".
+        # New English UI : "+" button at the bottom of the input area.
+        # New Chinese UI : "添加" / "+" button.
+        # Old UI (both)  : "Tools" / "工具" button.
+        # -----------------------------------------------------------------------
         tool_button_locators = [
-            page.get_by_role("button", name=re.compile(r"(工具|Tools)", re.I)),
-            page.locator('button[aria-label*="工具"]'),
+            # --- English new UI ---
+            page.get_by_role("button", name=re.compile(r"^\+$")),
+            page.get_by_role("button", name=re.compile(r"^Add$", re.I)),
+            page.locator('button[aria-label="+"]'),
+            page.locator('button[aria-label="Add"]'),
+            page.locator('button[data-test-id="attachment-button"]'),
+            # --- Chinese new UI ---
+            page.get_by_role("button", name=re.compile(r"^添加$")),
+            page.locator('button[aria-label="添加"]'),
+            # --- English old UI ---
+            page.get_by_role("button", name=re.compile(r"^Tools$", re.I)),
+            page.locator('button[aria-label="Tools"]'),
             page.locator('button[aria-label*="Tools"]'),
-            page.locator('button:has-text("工具")'),
             page.locator('button:has-text("Tools")'),
+            # --- Chinese old UI ---
+            page.get_by_role("button", name=re.compile(r"^工具$")),
+            page.locator('button[aria-label="工具"]'),
+            page.locator('button[aria-label*="工具"]'),
+            page.locator('button:has-text("工具")'),
         ]
 
         opened_menu = False
         for loc in tool_button_locators:
             try:
                 if await loc.first.is_visible():
-                    logger.info("  🔍 Clicking tool button...")
+                    logger.info("  🔍 Clicking tool/add button to open menu...")
                     await loc.first.click()
                     await asyncio.sleep(1)
                     opened_menu = True
@@ -405,17 +470,38 @@ class ImageGenerator:
             logger.warning("  ⚠️  Could not open tool menu")
             return False
 
-        # Select image generation tool
+        # Save screenshot after opening menu for debugging
+        try:
+            screenshot_path = f"/tmp/debug_tool_menu_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            await page.screenshot(path=screenshot_path)
+            logger.info(f"  📸 Tool menu screenshot: {screenshot_path}")
+        except Exception:
+            pass
+
+        # Select the image generation item from the now-open menu.
+        # English UI: "Create image" / "Make images"
+        # Chinese UI: "制作图片" / "创建图片"
         menu_item_locators = [
+            # Role-based (most robust, language-agnostic via regex)
             page.get_by_role("menuitemcheckbox", name=image_tool_regex),
-            page.get_by_role("menuitem", name=image_tool_regex),
-            page.locator('div[role="menuitemcheckbox"]:has-text("制作图片")'),
-            page.locator('div[role="menuitem"]:has-text("制作图片")'),
-            page.locator('button:has-text("制作图片")'),
+            page.get_by_role("menuitem",         name=image_tool_regex),
+            page.get_by_role("option",           name=image_tool_regex),
+            # English – explicit text selectors
+            page.locator('div[role="menuitemcheckbox"]:has-text("Create image")'),
+            page.locator('div[role="menuitem"]:has-text("Create image")'),
+            page.locator('li[role="menuitem"]:has-text("Create image")'),
+            page.locator('button:has-text("Create image")'),
             page.locator('div[role="menuitem"]:has-text("Make images")'),
             page.locator('button:has-text("Make images")'),
             page.locator('div[role="menuitem"]:has-text("Create images")'),
             page.locator('button:has-text("Create images")'),
+            # Chinese – explicit text selectors
+            page.locator('div[role="menuitemcheckbox"]:has-text("制作图片")'),
+            page.locator('div[role="menuitem"]:has-text("制作图片")'),
+            page.locator('li[role="menuitem"]:has-text("制作图片")'),
+            page.locator('button:has-text("制作图片")'),
+            page.locator('div[role="menuitem"]:has-text("创建图片")'),
+            page.locator('button:has-text("创建图片")'),
         ]
 
         for loc in menu_item_locators:
