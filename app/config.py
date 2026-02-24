@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     max_concurrent_tasks: int = 5
 
     # Generation Configuration
-    default_timeout: int = 120  # Increased for polling mechanism
+    default_timeout: int = 240  # Increased for polling mechanism
     video_timeout: int = 1800
     proxy: str | None = "http://127.0.0.1:7897"
     use_proxy: bool = True

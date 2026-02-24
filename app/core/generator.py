@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import logging
+import re
 from pathlib import Path
 from datetime import datetime
 from playwright.async_api import async_playwright, Page, Browser
@@ -98,6 +99,14 @@ class ImageGenerator:
                 logger.info("🔐 Verifying login status...")
                 await self._verify_login(page)
                 logger.info("✅ Login verified successfully")
+
+                # Ensure image generation tool is selected
+                logger.info("🧰 Ensuring image generation tool is selected...")
+                tool_selected = await self._ensure_image_tool(page)
+                if tool_selected:
+                    logger.info("✅ Image generation tool selected")
+                else:
+                    logger.warning("⚠️  Could not confirm image generation tool selection")
 
                 # Upload reference images if provided
                 uploaded_count = 0
@@ -308,6 +317,80 @@ class ImageGenerator:
             logger.warning(f"  ⚠️  WARNING: Could not upload reference image: {image_path}")
 
         return uploaded
+
+    async def _ensure_image_tool(self, page: Page) -> bool:
+        """Ensure the image generation tool is selected in Gemini UI."""
+        image_tool_regex = re.compile(r"(制作图片|Make images|Create images)", re.I)
+
+        async def _menu_item_visible() -> bool:
+            try:
+                loc = page.get_by_role("menuitemcheckbox", name=image_tool_regex)
+                return await loc.first.is_visible()
+            except Exception:
+                return False
+
+        # If the menu is already open, try selecting immediately.
+        if await _menu_item_visible():
+            try:
+                await page.get_by_role("menuitemcheckbox", name=image_tool_regex).first.click()
+                await asyncio.sleep(1)
+                logger.info("  ✅ Image tool menu item clicked (menu already open)")
+                return True
+            except Exception:
+                pass
+
+        # Open tool menu
+        tool_button_locators = [
+            page.get_by_role("button", name=re.compile(r"(工具|Tools)", re.I)),
+            page.locator('button[aria-label*="工具"]'),
+            page.locator('button[aria-label*="Tools"]'),
+            page.locator('button:has-text("工具")'),
+            page.locator('button:has-text("Tools")'),
+        ]
+
+        opened_menu = False
+        for loc in tool_button_locators:
+            try:
+                if await loc.first.is_visible():
+                    logger.info("  🔍 Clicking tool button...")
+                    await loc.first.click()
+                    await asyncio.sleep(1)
+                    opened_menu = True
+                    break
+            except Exception as e:
+                logger.warning(f"  ⚠️  Tool button click failed: {e}")
+                continue
+
+        if not opened_menu:
+            logger.warning("  ⚠️  Could not open tool menu")
+            return False
+
+        # Select image generation tool
+        menu_item_locators = [
+            page.get_by_role("menuitemcheckbox", name=image_tool_regex),
+            page.get_by_role("menuitem", name=image_tool_regex),
+            page.locator('div[role="menuitemcheckbox"]:has-text("制作图片")'),
+            page.locator('div[role="menuitem"]:has-text("制作图片")'),
+            page.locator('button:has-text("制作图片")'),
+            page.locator('div[role="menuitem"]:has-text("Make images")'),
+            page.locator('button:has-text("Make images")'),
+            page.locator('div[role="menuitem"]:has-text("Create images")'),
+            page.locator('button:has-text("Create images")'),
+        ]
+
+        for loc in menu_item_locators:
+            try:
+                if await loc.first.is_visible():
+                    await loc.first.click()
+                    await asyncio.sleep(2)
+                    logger.info("  ✅ Image tool menu item clicked")
+                    return True
+            except Exception as e:
+                logger.warning(f"  ⚠️  Image tool selector failed: {e}")
+                continue
+
+        logger.warning("  ⚠️  Image tool menu item not found")
+        return False
 
     async def _wait_for_generation(self, page: Page, timeout: int) -> bool:
         """
