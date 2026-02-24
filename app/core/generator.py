@@ -85,17 +85,152 @@ class ImageGenerator:
                 },
                 accept_downloads=True,
             )
-            # 注入反自动化检测脚本
+            # 注入全面反自动化检测脚本
             await context.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-                Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en-US', 'en']});
-                window.chrome = {runtime: {}};
-                const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) =>
-                    parameters.name === 'notifications'
-                        ? Promise.resolve({state: Notification.permission})
-                        : originalQuery(parameters);
+            (() => {
+                // ── 1. navigator.webdriver ──────────────────────────────────
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined, configurable: true});
+
+                // ── 2. navigator.plugins / mimeTypes ────────────────────────
+                // 伪造接近真实 Chrome 的 PluginArray
+                const makePlugin = (name, filename, description, mimeTypes) => {
+                    const plugin = Object.create(Plugin.prototype);
+                    Object.defineProperty(plugin, 'name',        {get: () => name});
+                    Object.defineProperty(plugin, 'filename',    {get: () => filename});
+                    Object.defineProperty(plugin, 'description', {get: () => description});
+                    Object.defineProperty(plugin, 'length',      {get: () => mimeTypes.length});
+                    mimeTypes.forEach((mt, i) => { plugin[i] = mt; });
+                    return plugin;
+                };
+                const makeMime = (type, suffixes, description) => {
+                    const mt = Object.create(MimeType.prototype);
+                    Object.defineProperty(mt, 'type',        {get: () => type});
+                    Object.defineProperty(mt, 'suffixes',    {get: () => suffixes});
+                    Object.defineProperty(mt, 'description', {get: () => description});
+                    return mt;
+                };
+                const pdfMime   = makeMime('application/pdf', 'pdf', 'Portable Document Format');
+                const pdfMime2  = makeMime('text/pdf', 'pdf', 'Portable Document Format');
+                const nacl1     = makeMime('application/x-nacl', '', 'Native Client Executable');
+                const nacl2     = makeMime('application/x-pnacl', '', 'Portable Native Client Executable');
+                const plugins   = [
+                    makePlugin('Chrome PDF Plugin', 'internal-pdf-viewer', 'Portable Document Format', [pdfMime, pdfMime2]),
+                    makePlugin('Chrome PDF Viewer', 'mhjfbmdgcfjbbpaeojofohoefgiehjai', '', [pdfMime]),
+                    makePlugin('Native Client', 'internal-nacl-plugin', '', [nacl1, nacl2]),
+                ];
+                const pluginArr = Object.create(PluginArray.prototype);
+                Object.defineProperty(pluginArr, 'length', {get: () => plugins.length});
+                plugins.forEach((p, i) => { pluginArr[i] = p; });
+                pluginArr.item    = (i) => pluginArr[i];
+                pluginArr.namedItem = (n) => plugins.find(p => p.name === n) || null;
+                pluginArr.refresh = () => {};
+                Object.defineProperty(navigator, 'plugins',   {get: () => pluginArr,    configurable: true});
+                Object.defineProperty(navigator, 'mimeTypes', {get: () => {              // MimeTypeArray
+                    const arr = Object.create(MimeTypeArray.prototype);
+                    const mts = [pdfMime, pdfMime2, nacl1, nacl2];
+                    Object.defineProperty(arr, 'length', {get: () => mts.length});
+                    mts.forEach((m, i) => { arr[i] = m; });
+                    arr.item      = (i) => mts[i];
+                    arr.namedItem = (n) => mts.find(m => m.type === n) || null;
+                    return arr;
+                }, configurable: true});
+
+                // ── 3. navigator.languages ──────────────────────────────────
+                Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en-US', 'en'], configurable: true});
+
+                // ── 4. navigator.platform ───────────────────────────────────
+                // 与 UA 中 "Macintosh" 保持一致
+                Object.defineProperty(navigator, 'platform', {get: () => 'MacIntel', configurable: true});
+
+                // ── 5. navigator.hardwareConcurrency / deviceMemory ─────────
+                Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8,    configurable: true});
+                Object.defineProperty(navigator, 'deviceMemory',        {get: () => 8,    configurable: true});
+
+                // ── 6. window.chrome ────────────────────────────────────────
+                window.chrome = {
+                    runtime: {
+                        connect:          () => {},
+                        sendMessage:      () => {},
+                        onMessage:        {addListener: () => {}, removeListener: () => {}},
+                        onConnect:        {addListener: () => {}, removeListener: () => {}},
+                        id:               undefined,
+                        getManifest:      () => ({}),
+                    },
+                    loadTimes: () => ({
+                        commitLoadTime:     performance.timeOrigin / 1000,
+                        connectionInfo:     'http/1.1',
+                        finishDocumentLoadTime: (performance.timeOrigin + performance.now()) / 1000,
+                        finishLoadTime:     (performance.timeOrigin + performance.now()) / 1000,
+                        firstPaintAfterLoadTime: 0,
+                        firstPaintTime:     (performance.timeOrigin + performance.now()) / 1000,
+                        navigationType:     'Other',
+                        npnNegotiatedProtocol: 'h2',
+                        requestTime:        performance.timeOrigin / 1000,
+                        startLoadTime:      performance.timeOrigin / 1000,
+                        wasAlternateProtocolAvailable: false,
+                        wasFetchedViaSpdy:  true,
+                        wasNpnNegotiated:   true,
+                    }),
+                    csi: () => ({
+                        onloadT: performance.timeOrigin,
+                        pageT:   performance.now(),
+                        startE:  performance.timeOrigin,
+                        tran:    15,
+                    }),
+                    app: {
+                        isInstalled: false,
+                        InstallState: {DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed'},
+                        RunningState: {CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running'},
+                        getDetails:   () => null,
+                        getIsInstalled: () => false,
+                        installState: () => 'not_installed',
+                        runningState: () => 'cannot_run',
+                    },
+                };
+
+                // ── 7. outerWidth / outerHeight ─────────────────────────────
+                // headless 下默认为 0，伪造为视口大小
+                if (window.outerWidth === 0) {
+                    Object.defineProperty(window, 'outerWidth',  {get: () => window.innerWidth,  configurable: true});
+                    Object.defineProperty(window, 'outerHeight', {get: () => window.innerHeight + 88, configurable: true});
+                }
+
+                // ── 8. screen ───────────────────────────────────────────────
+                Object.defineProperty(screen, 'availWidth',  {get: () => 1920, configurable: true});
+                Object.defineProperty(screen, 'availHeight', {get: () => 1080, configurable: true});
+                Object.defineProperty(screen, 'width',       {get: () => 1920, configurable: true});
+                Object.defineProperty(screen, 'height',      {get: () => 1080, configurable: true});
+                Object.defineProperty(screen, 'colorDepth',  {get: () => 24,   configurable: true});
+                Object.defineProperty(screen, 'pixelDepth',  {get: () => 24,   configurable: true});
+
+                // ── 9. document.hasFocus / visibilityState ──────────────────
+                document.hasFocus        = () => true;
+                Object.defineProperty(document, 'hidden',          {get: () => false,    configurable: true});
+                Object.defineProperty(document, 'visibilityState', {get: () => 'visible', configurable: true});
+
+                // ── 10. Permissions API ─────────────────────────────────────
+                const _origPermQuery = navigator.permissions.query.bind(navigator.permissions);
+                navigator.permissions.query = (parameters) => {
+                    const alwaysGranted = ['notifications', 'clipboard-read', 'clipboard-write'];
+                    if (alwaysGranted.includes(parameters.name)) {
+                        return Promise.resolve(Object.assign(Object.create(PermissionStatus.prototype), {
+                            state: 'granted', onchange: null
+                        }));
+                    }
+                    return _origPermQuery(parameters);
+                };
+
+                // ── 11. 覆盖 toString 防止函数特征检测 ─────────────────────
+                const nativeToString = Function.prototype.toString;
+                const patchedFns = new WeakSet();
+                const markNative = (fn) => { patchedFns.add(fn); return fn; };
+                Function.prototype.toString = function() {
+                    if (patchedFns.has(this)) return `function ${this.name || ''}() { [native code] }`;
+                    return nativeToString.call(this);
+                };
+                markNative(navigator.permissions.query);
+                markNative(Function.prototype.toString);
+            })();
             """);
 
             logger.info("🍪 Adding cookies to browser context...")
@@ -214,6 +349,26 @@ class ImageGenerator:
                 "--disable-features=IsolateOrigins,site-per-process",
                 "--ignore-certificate-errors",
                 "--allow-running-insecure-content",
+                # 修复 headless 特有的空 outerWidth/outerHeight
+                "--start-maximized",
+                # 禁止暴露自动化标志
+                "--exclude-switches=enable-automation",
+                "--disable-extensions",
+                # 避免 WebGL 暴露 SwiftShader 渲染器
+                "--use-gl=angle",
+                "--use-angle=swiftshader-webgl",
+                # 减少熵值泄漏
+                "--disable-client-side-phishing-detection",
+                "--disable-default-apps",
+                "--disable-hang-monitor",
+                "--disable-popup-blocking",
+                "--disable-prompt-on-repost",
+                "--disable-sync",
+                "--metrics-recording-only",
+                "--no-first-run",
+                "--safebrowsing-disable-auto-update",
+                "--password-store=basic",
+                "--use-mock-keychain",
             ],
         }
         if self.proxy:
