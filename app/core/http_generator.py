@@ -92,9 +92,15 @@ class HttpImageGenerator:
     }
     FRAME_LENGTH_PATTERN = re.compile(r"(\d+)\n")
 
-    def __init__(self, cookie_manager: CookieManager, proxy: str | None = None):
+    def __init__(
+        self,
+        cookie_manager: CookieManager,
+        proxy: str | None = None,
+        account_id: str | None = None,
+    ):
         self.cookie_manager = cookie_manager
         self.proxy = proxy
+        self.account_id = account_id or "unknown"
 
         self._session: AsyncSession | None = None
         self._cookies = Cookies()
@@ -517,6 +523,12 @@ class HttpImageGenerator:
             raise self._cookies_expired("Cookies file is empty")
 
         jar = Cookies()
+        auth_candidates: dict[str, list[dict[str, Any]]] = {
+            "__Secure-1PSID": [],
+            "__Secure-1PSIDTS": [],
+        }
+        now = time.time()
+
         for item in raw_cookies:
             if not isinstance(item, dict):
                 continue
@@ -529,22 +541,115 @@ class HttpImageGenerator:
                 continue
             jar.set(name, value, domain=domain or ".google.com", path=item.get("path", "/"))
 
-        if not jar.get("__Secure-1PSID", domain=".google.com"):
-            for item in raw_cookies:
-                if not isinstance(item, dict):
-                    continue
-                if item.get("name") == "__Secure-1PSID" and item.get("value"):
-                    jar.set("__Secure-1PSID", str(item["value"]), domain=".google.com", path="/")
-                    break
-        if not jar.get("__Secure-1PSIDTS", domain=".google.com"):
-            for item in raw_cookies:
-                if not isinstance(item, dict):
-                    continue
-                if item.get("name") == "__Secure-1PSIDTS" and item.get("value"):
-                    jar.set("__Secure-1PSIDTS", str(item["value"]), domain=".google.com", path="/")
-                    break
+            if name not in auth_candidates:
+                continue
+            normalized_domain = self._normalize_cookie_domain(domain)
+            if not self._is_auth_google_domain(normalized_domain):
+                continue
+
+            expiration = item.get("expirationDate", 0)
+            try:
+                exp_ts = float(expiration) if expiration else 0.0
+            except (TypeError, ValueError):
+                exp_ts = 0.0
+            # Skip obviously expired persistent cookies.
+            if exp_ts and exp_ts < now:
+                continue
+
+            auth_candidates[name].append(
+                {
+                    "value": value,
+                    "domain": normalized_domain,
+                    "group": self._auth_domain_group(normalized_domain),
+                    "rank": self._auth_domain_rank(normalized_domain),
+                    "expires": exp_ts,
+                }
+            )
+
+        selected_psid, selected_psidts = self._select_auth_cookie_pair(auth_candidates)
+        if selected_psid:
+            jar.set("__Secure-1PSID", selected_psid["value"], domain=".google.com", path="/")
+        if selected_psidts:
+            jar.set("__Secure-1PSIDTS", selected_psidts["value"], domain=".google.com", path="/")
+
+        if selected_psid:
+            logger.debug(
+                "Selected auth cookies domains: __Secure-1PSID=%s, __Secure-1PSIDTS=%s",
+                selected_psid["domain"],
+                selected_psidts["domain"] if selected_psidts else "missing",
+            )
 
         return jar
+
+    @staticmethod
+    def _normalize_cookie_domain(domain: str) -> str:
+        return domain.strip().lower().lstrip(".")
+
+    @staticmethod
+    def _is_auth_google_domain(normalized_domain: str) -> bool:
+        return (
+            normalized_domain == "google.com"
+            or normalized_domain.endswith(".google.com")
+            or normalized_domain.startswith("google.")
+            or ".google." in normalized_domain
+        )
+
+    @staticmethod
+    def _auth_domain_group(normalized_domain: str) -> int:
+        # Highest priority: google.com + *.google.com
+        if normalized_domain == "google.com" or normalized_domain.endswith(".google.com"):
+            return 0
+        # Fallback: regional Google domains like google.com.hk / *.google.com.hk
+        if normalized_domain.startswith("google.") or ".google." in normalized_domain:
+            return 1
+        return 2
+
+    @staticmethod
+    def _auth_domain_rank(normalized_domain: str) -> int:
+        # Prefer root google.com over subdomains in primary group.
+        if normalized_domain == "google.com":
+            return 0
+        if normalized_domain.endswith(".google.com"):
+            return 1
+        if normalized_domain.startswith("google."):
+            return 2
+        return 3
+
+    def _pick_best_auth_candidate(self, candidates: list[dict[str, Any]], group: int | None = None) -> dict[str, Any] | None:
+        pool = [c for c in candidates if group is None or c["group"] == group]
+        if not pool:
+            return None
+        # Prefer lower group/rank, then later expiration.
+        return sorted(pool, key=lambda c: (c["group"], c["rank"], -c["expires"]))[0]
+
+    def _select_auth_cookie_pair(
+        self,
+        auth_candidates: dict[str, list[dict[str, Any]]],
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        psid_list = auth_candidates.get("__Secure-1PSID", [])
+        psidts_list = auth_candidates.get("__Secure-1PSIDTS", [])
+        if not psid_list:
+            return None, None
+
+        psid_groups = {item["group"] for item in psid_list}
+        psidts_groups = {item["group"] for item in psidts_list}
+
+        selected_group: int | None = None
+        for group in (0, 1, 2):
+            if group in psid_groups and group in psidts_groups:
+                selected_group = group
+                break
+
+        if selected_group is not None:
+            return (
+                self._pick_best_auth_candidate(psid_list, selected_group),
+                self._pick_best_auth_candidate(psidts_list, selected_group),
+            )
+
+        return (
+            self._pick_best_auth_candidate(psid_list),
+            self._pick_best_auth_candidate(psidts_list),
+        )
 
     def _start_rotate_task_if_needed(self):
         if self._rotate_task and not self._rotate_task.done():
@@ -559,7 +664,11 @@ class HttpImageGenerator:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning("Cookie rotation background task failed: %s", exc)
+                logger.warning(
+                    "Cookie rotation background task failed for account '%s': %s",
+                    self.account_id,
+                    exc,
+                )
 
     def _assert_auth_ok(self, response: Response):
         response_url = str(response.url).lower()

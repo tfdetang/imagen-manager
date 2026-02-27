@@ -1,19 +1,29 @@
 """FastAPI application entry point."""
-from contextlib import asynccontextmanager
+import asyncio
+import logging
+from contextlib import asynccontextmanager, suppress
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import router
+from app.api.routes import router, warmup_http_image_accounts
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
-    # Startup: no automatic cleanup (use POST /v1/cleanup to trigger manually)
+    warmup_task = asyncio.create_task(warmup_http_image_accounts())
     yield
-    # Shutdown: nothing to cleanup
+    if not warmup_task.done():
+        warmup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await warmup_task
+    else:
+        with suppress(Exception):
+            warmup_task.result()
 
 
 app = FastAPI(

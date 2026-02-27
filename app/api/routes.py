@@ -433,6 +433,36 @@ def _get_image_account_pool(engine: str) -> AccountPool:
     return pool
 
 
+async def warmup_http_image_accounts():
+    """Warm up all HTTP image accounts at startup."""
+    http_pool = image_account_pools.get("http")
+    if not http_pool:
+        return
+
+    async def _warm_one_account(state):
+        ensure_session = getattr(state.generator, "_ensure_session", None)
+        if not callable(ensure_session):
+            return
+
+        try:
+            await asyncio.wait_for(ensure_session(), timeout=45)
+            logger.info("HTTP account warmup succeeded: account_id=%s", state.account_id)
+        except asyncio.TimeoutError:
+            logger.warning("HTTP account warmup timed out: account_id=%s", state.account_id)
+        except HTTPException as exc:
+            if _is_cookies_expired_error(exc):
+                http_pool.mark_cooldown(
+                    state.account_id,
+                    settings.account_cooldown_seconds,
+                    reason="cookies_expired",
+                )
+            logger.warning("HTTP account warmup failed: account_id=%s, detail=%s", state.account_id, exc.detail)
+        except Exception as exc:
+            logger.warning("HTTP account warmup failed: account_id=%s, error=%s", state.account_id, exc)
+
+    await asyncio.gather(*(_warm_one_account(state) for state in http_pool.iter_account_states()))
+
+
 async def _generate_image_with_engine(
     request: GenerateImageRequest,
     engine: str,

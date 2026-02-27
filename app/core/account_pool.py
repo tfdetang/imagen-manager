@@ -83,7 +83,11 @@ class AccountPool:
         if self._image_engine == "http":
             from app.core.http_generator import HttpImageGenerator
 
-            generator: ImageGeneratorEngine = HttpImageGenerator(cookie_manager, self._proxy)
+            generator: ImageGeneratorEngine = HttpImageGenerator(
+                cookie_manager,
+                self._proxy,
+                account_id=account_id,
+            )
         elif self._image_engine == "playwright":
             generator = ImageGenerator(cookie_manager, self._proxy)
         else:
@@ -225,3 +229,7 @@ class AccountPool:
             "accounts_available": available_count,
             "accounts": account_items,
         }
+
+    def iter_account_states(self) -> list[AccountState]:
+        """Return a snapshot list of account states."""
+        return list(self._accounts.values())
