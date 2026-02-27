@@ -26,7 +26,6 @@ from app.models import (
     VideoTaskAssetsResponse,
     VideoTaskResponse,
 )
-from app.core.browser import CookieManager
 from app.core.account_pool import AccountPool
 from app.core.semaphore import ConcurrencyManager
 from app.core.video_generator import JimengVideoGenerator, VideoGenerationResult, VideoSubmitOptions
@@ -163,10 +162,12 @@ async def _generate_with_account_pool(
     prompt: str,
     timeout: int,
     reference_images: list[Path] | None = None,
+    pool: AccountPool | None = None,
 ) -> Path:
     """Generate image with account failover on cookie-expired errors."""
+    selected_pool = pool or account_pool
     # Check if any account is available before starting
-    stats = account_pool.stats()
+    stats = selected_pool.stats()
     if stats["accounts_available"] == 0:
         raise HTTPException(
             status_code=503,
@@ -186,14 +187,14 @@ async def _generate_with_account_pool(
 
     for attempt in range(1, max_attempts + 1):
         try:
-            lease = await account_pool.acquire()
+            lease = await selected_pool.acquire()
         except HTTPException:
             # No available accounts
             break
 
         # Skip if we already tried this account
         if lease.account_id in tried_accounts:
-            account_pool.release(lease)
+            selected_pool.release(lease)
             break
 
         tried_accounts.add(lease.account_id)
@@ -208,7 +209,7 @@ async def _generate_with_account_pool(
             return image_path
         except HTTPException as exc:
             if _is_cookies_expired_error(exc):
-                account_pool.mark_cooldown(
+                selected_pool.mark_cooldown(
                     lease.account_id,
                     settings.account_cooldown_seconds,
                     reason="cookies_expired",
@@ -221,7 +222,7 @@ async def _generate_with_account_pool(
                 continue
             raise
         finally:
-            account_pool.release(lease)
+            selected_pool.release(lease)
 
     if last_error:
         raise last_error
@@ -389,14 +390,25 @@ async def _process_video_task_request(
 
 
 # Initialize singletons
-cookie_manager = CookieManager(settings.cookies_path)
 concurrency_manager = ConcurrencyManager(settings.max_concurrent_tasks)
 storage = ImageStorage(settings.storage_dir, settings.base_url)
-account_pool = AccountPool(
-    _discover_account_sources(),
-    proxy=settings.effective_proxy,
-    per_account_concurrent=settings.per_account_concurrent_tasks,
-)
+account_sources = _discover_account_sources()
+image_account_pools: dict[str, AccountPool] = {
+    "http": AccountPool(
+        account_sources,
+        proxy=settings.effective_proxy,
+        per_account_concurrent=settings.per_account_concurrent_tasks,
+        image_engine="http",
+    ),
+    "playwright": AccountPool(
+        account_sources,
+        proxy=settings.effective_proxy,
+        per_account_concurrent=settings.per_account_concurrent_tasks,
+        image_engine="playwright",
+    ),
+}
+default_image_engine = settings.image_engine.lower() if settings.image_engine.lower() in image_account_pools else "http"
+account_pool = image_account_pools[default_image_engine]
 video_task_manager = VideoTaskManager(
     _process_video_task_request,
     storage_path=settings.video_tasks_path,
@@ -405,16 +417,31 @@ video_task_manager = VideoTaskManager(
 router = APIRouter()
 
 
-@router.post("/v1/images/generations", response_model=ImageResponse)
-async def generate_image(
-    request: GenerateImageRequest,
-    _: str = Depends(verify_api_key),
-):
-    """
-    Generate image from text prompt (OpenAI compatible).
+def _get_image_account_pool(engine: str) -> AccountPool:
+    pool = image_account_pools.get(engine.lower())
+    if not pool:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "message": f"Unsupported image engine: {engine}",
+                    "type": "invalid_request_error",
+                    "code": "invalid_engine",
+                }
+            },
+        )
+    return pool
 
-    Compatible with OpenAI's images.generate() API.
+
+async def _generate_image_with_engine(
+    request: GenerateImageRequest,
+    engine: str,
+) -> ImageResponse:
     """
+    Generate image from text prompt with selected engine.
+    """
+    image_pool = _get_image_account_pool(engine)
+
     # Validate n parameter
     if request.n != 1:
         raise HTTPException(
@@ -436,6 +463,7 @@ async def generate_image(
         temp_image = await _generate_with_account_pool(
             prompt=request.prompt,
             timeout=settings.default_timeout,
+            pool=image_pool,
         )
 
         # Save and get URL
@@ -448,6 +476,33 @@ async def generate_image(
 
     finally:
         concurrency_manager.release()
+
+
+@router.post("/v1/images/generations", response_model=ImageResponse)
+async def generate_image(
+    request: GenerateImageRequest,
+    _: str = Depends(verify_api_key),
+):
+    """Generate image (legacy route, uses default engine)."""
+    return await _generate_image_with_engine(request, default_image_engine)
+
+
+@router.post("/http/v1/images/generations", response_model=ImageResponse)
+async def generate_image_http(
+    request: GenerateImageRequest,
+    _: str = Depends(verify_api_key),
+):
+    """Generate image using HTTP engine."""
+    return await _generate_image_with_engine(request, "http")
+
+
+@router.post("/playwright/v1/images/generations", response_model=ImageResponse)
+async def generate_image_playwright(
+    request: GenerateImageRequest,
+    _: str = Depends(verify_api_key),
+):
+    """Generate image using Playwright engine."""
+    return await _generate_image_with_engine(request, "playwright")
 
 
 @router.post("/v1/videos/generations", response_model=VideoResponse)
@@ -590,21 +645,17 @@ async def get_video_task_assets(
     )
 
 
-@router.post("/v1/images/edits", response_model=ImageResponse)
-async def edit_image(
-    image: List[UploadFile] = File(..., description="Images to edit (supports multiple)"),
-    prompt: str = Form(..., description="Edit instructions"),
-    n: int = Form(1, description="Number of images (only 1 supported)"),
-    size: str | None = Form(None, description="Size (ignored)"),
-    _: str = Depends(verify_api_key),
+async def _edit_image_with_engine(
+    image: List[UploadFile],
+    prompt: str,
+    n: int,
+    engine: str = "http",
 ):
     """
-    Edit image based on prompt (OpenAI compatible).
-
-    Supports multiple reference images - send multiple 'image' fields in multipart/form-data.
-
-    Compatible with OpenAI's images.edit() API.
+    Edit image with selected image engine.
     """
+    image_pool = _get_image_account_pool(engine)
+
     # Validate n parameter
     if n != 1:
         raise HTTPException(
@@ -704,6 +755,7 @@ async def edit_image(
                 prompt=prompt,
                 timeout=settings.default_timeout,
                 reference_images=temp_uploads,  # Pass list of images
+                pool=image_pool,
             )
 
             # Save and get URL
@@ -744,6 +796,45 @@ async def edit_image(
                     logger.info(f"Cleaned up temporary file: {temp_upload}")
                 except Exception as e:
                     logger.warning(f"Failed to cleanup temporary file {temp_upload}: {e}")
+
+
+@router.post("/v1/images/edits", response_model=ImageResponse)
+async def edit_image(
+    image: List[UploadFile] = File(..., description="Images to edit (supports multiple)"),
+    prompt: str = Form(..., description="Edit instructions"),
+    n: int = Form(1, description="Number of images (only 1 supported)"),
+    size: str | None = Form(None, description="Size (ignored)"),
+    _: str = Depends(verify_api_key),
+):
+    """Edit image (legacy route, uses default engine)."""
+    _ = size
+    return await _edit_image_with_engine(image=image, prompt=prompt, n=n, engine=default_image_engine)
+
+
+@router.post("/http/v1/images/edits", response_model=ImageResponse)
+async def edit_image_http(
+    image: List[UploadFile] = File(..., description="Images to edit (supports multiple)"),
+    prompt: str = Form(..., description="Edit instructions"),
+    n: int = Form(1, description="Number of images (only 1 supported)"),
+    size: str | None = Form(None, description="Size (ignored)"),
+    _: str = Depends(verify_api_key),
+):
+    """Edit image using HTTP engine."""
+    _ = size
+    return await _edit_image_with_engine(image=image, prompt=prompt, n=n, engine="http")
+
+
+@router.post("/playwright/v1/images/edits", response_model=ImageResponse)
+async def edit_image_playwright(
+    image: List[UploadFile] = File(..., description="Images to edit (supports multiple)"),
+    prompt: str = Form(..., description="Edit instructions"),
+    n: int = Form(1, description="Number of images (only 1 supported)"),
+    size: str | None = Form(None, description="Size (ignored)"),
+    _: str = Depends(verify_api_key),
+):
+    """Edit image using Playwright engine."""
+    _ = size
+    return await _edit_image_with_engine(image=image, prompt=prompt, n=n, engine="playwright")
 
 
 @router.get("/v1/health", response_model=HealthResponse)
@@ -810,18 +901,41 @@ async def upload_cookies(
             )
 
         target_account = _normalize_account_id(account_id)
-        target_manager = account_pool.get_cookie_manager(target_account)
+        target_manager = None
+        for pool in image_account_pools.values():
+            manager = pool.get_cookie_manager(target_account)
+            if manager:
+                target_manager = manager
+                break
+
         if not target_manager:
             if target_account == "default":
-                target_manager = cookie_manager
+                cookies_file = settings.cookies_path
             else:
                 account_dir = settings.accounts_dir / target_account
                 account_dir.mkdir(parents=True, exist_ok=True)
                 cookies_file = account_dir / "cookies.json"
-                target_manager = account_pool.add_or_update_account(target_account, cookies_file)
+
+            for pool in image_account_pools.values():
+                manager = pool.add_or_update_account(target_account, cookies_file)
+                if target_manager is None:
+                    target_manager = manager
+
+        if target_manager is None:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": {
+                        "message": "Failed to initialize cookie manager",
+                        "type": "server_error",
+                        "code": "cookie_manager_init_failed",
+                    }
+                },
+            )
 
         saved_path = target_manager.save_cookies(cookies_data)
-        account_pool.clear_cooldown(target_account)
+        for pool in image_account_pools.values():
+            pool.clear_cooldown(target_account)
         logger.info(f"Cookies saved to {saved_path}, account={target_account}, {len(cookies_data)} cookies")
 
         return CookiesUploadResponse(

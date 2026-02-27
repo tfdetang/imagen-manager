@@ -279,6 +279,14 @@ class ImageGenerator:
                 else:
                     logger.warning("⚠️  Could not switch to temporary chat, continuing anyway")
 
+                # Switch to Pro mode BEFORE image tool (image tool disables model selector)
+                logger.info("⭐ Switching to Pro mode...")
+                pro_selected = await self._ensure_pro_mode(page)
+                if pro_selected:
+                    logger.info("✅ Pro mode activated")
+                else:
+                    logger.warning("⚠️  Could not confirm Pro mode selection, continuing anyway")
+
                 # Ensure image generation tool is selected
                 logger.info("🧰 Ensuring image generation tool is selected...")
                 tool_selected = await self._ensure_image_tool(page)
@@ -286,14 +294,6 @@ class ImageGenerator:
                     logger.info("✅ Image generation tool selected")
                 else:
                     logger.warning("⚠️  Could not confirm image generation tool selection")
-
-                # Switch to Pro mode for best image quality
-                logger.info("⭐ Switching to Pro mode...")
-                pro_selected = await self._ensure_pro_mode(page)
-                if pro_selected:
-                    logger.info("✅ Pro mode activated")
-                else:
-                    logger.warning("⚠️  Could not confirm Pro mode selection, continuing anyway")
 
                 # Upload reference images if provided
                 uploaded_count = 0
@@ -359,10 +359,11 @@ class ImageGenerator:
     async def _launch_browser(self, playwright) -> Browser:
         """Launch browser with optional proxy."""
         launch_opts = {
-            "headless": True,
+            "headless": False,
             "args": [
                 "--lang=zh-CN",
                 "--window-size=1920,1080",
+                "--window-position=-9999,-9999",
                 # 反自动化检测
                 "--disable-blink-features=AutomationControlled",
                 "--disable-infobars",
@@ -424,37 +425,31 @@ class ImageGenerator:
                 },
             )
 
-        # Check 2: Look for "Sign in" button in the header area (indicates not logged in)
-        # Gemini can be accessed without login, but we need login for full functionality
+        # Check 2: Look for sign-in link in the header (indicates not logged in)
+        # The header shows an <a> linking to accounts.google.com for unauthenticated users.
+        # This is the most reliable indicator across both English and Chinese UIs.
         try:
-            signin_button = await page.wait_for_selector(
-                'a[href*="signin"], button:has-text("Sign in"), a:has-text("Sign in")',
-                timeout=3000
+            signin_link = await page.wait_for_selector(
+                'a[href*="accounts.google.com/ServiceLogin"]',
+                timeout=3000,
             )
-            if signin_button:
-                # Verify it's visible in the header area (not just any "sign in" text)
-                is_visible = await signin_button.is_visible()
-                if is_visible:
-                    logger.error("❌ Found 'Sign in' button - not logged in! Cookies may be expired")
-                    raise HTTPException(
-                        status_code=503,
-                        detail={
-                            "error": {
-                                "message": "Service temporarily unavailable: Google cookies expired (Sign in button visible)",
-                                "type": "service_error",
-                                "code": "cookies_expired",
-                            }
-                        },
-                    )
+            if signin_link and await signin_link.is_visible():
+                logger.error("❌ Found sign-in link - not logged in! Cookies may be expired")
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "error": {
+                            "message": "Service temporarily unavailable: Google cookies expired (sign-in link visible)",
+                            "type": "service_error",
+                            "code": "cookies_expired",
+                        }
+                    },
+                )
         except HTTPException:
-            # Re-raise HTTPException to trigger account switch
             raise
-        except Exception as e:
-            # No "Sign in" button found (timeout) - this is good, means user is logged in
-            if "Timeout" in str(e):
-                logger.info("  ✅ No 'Sign in' button found - user appears to be logged in")
-            else:
-                logger.warning(f"  ⚠️  Error checking sign in button: {e}")
+        except Exception:
+            pass
+        logger.info("  ✅ No sign-in link found - user appears to be logged in")
 
         # Check 3: Verify we have the input area (basic functionality check)
         try:
@@ -601,6 +596,10 @@ class ImageGenerator:
         for loc in model_selector_locators:
             try:
                 if await loc.first.is_visible():
+                    # Skip disabled buttons (e.g. after image tool selection locks the model)
+                    if not await loc.first.is_enabled():
+                        logger.info("  ℹ️  Model selector is disabled, skipping")
+                        return False
                     logger.info("  🔍 Clicking model selector to open dropdown...")
                     await loc.first.click()
                     await asyncio.sleep(1)
@@ -749,7 +748,21 @@ class ImageGenerator:
                 if await loc.first.is_visible():
                     logger.info("  🖼️  Clicking 'Create image' shortcut pill on landing page...")
                     await loc.first.click()
+                    # Wait for page transition to complete after pill click.
+                    # The pill triggers a navigation; we must wait until the input
+                    # area is ready and the landing-page pills have disappeared.
+                    for _ in range(10):
+                        await asyncio.sleep(1)
+                        # Check if pill is gone (page transitioned away from landing)
+                        still_visible = False
+                        try:
+                            still_visible = await loc.first.is_visible()
+                        except Exception:
+                            pass
+                        if not still_visible:
+                            break
                     await asyncio.sleep(2)
+                    await self._dismiss_overlays(page)
                     logger.info("  ✅ 'Create image' shortcut pill clicked")
                     return True
             except Exception:
@@ -867,6 +880,34 @@ class ImageGenerator:
         logger.warning("  ⚠️  Image tool menu item not found")
         return False
 
+    async def _dismiss_overlays(self, page: Page):
+        """Dismiss any cdk-overlay popups (feature promos, email opt-in, etc.)."""
+        try:
+            has_overlay = await page.evaluate("""() => {
+                const c = document.querySelector('.cdk-overlay-container');
+                return c && c.children.length > 0 && c.innerText.trim().length > 0;
+            }""")
+            if not has_overlay:
+                return
+            logger.info("  🔲 Overlay detected, dismissing...")
+            # Try clicking any button inside the overlay (close/dismiss/got-it)
+            overlay_btns = await page.query_selector_all('.cdk-overlay-container button')
+            for btn in overlay_btns:
+                try:
+                    if await btn.is_visible():
+                        await btn.click()
+                        await asyncio.sleep(0.5)
+                        logger.info("  ✅ Clicked overlay button")
+                        return
+                except:
+                    continue
+            # Fallback: press Escape
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.5)
+            logger.info("  ✅ Dismissed overlay via Escape")
+        except Exception:
+            pass
+
     async def _keep_alive_wait(self, page: Page, seconds: float):
         """
         Wait for `seconds` while periodically simulating user activity to
@@ -938,9 +979,16 @@ class ImageGenerator:
                 except Exception:
                     pass
 
+            # If page text contains "Loading" indicator, generation is still in progress
+            has_loading = await page.evaluate(
+                '() => document.body.innerText.includes("Loading") || document.body.innerText.includes("加载")'
+            )
+            if has_loading:
+                return False
+
             # If an enabled send button is visible, the page is in idle input mode
             send_btn = await page.query_selector(
-                'button[aria-label*="send" i], button[aria-label*="Send" i]'
+                'button[aria-label*="send" i], button[aria-label*="Send" i], button[aria-label="发送"]'
             )
             if send_btn and await send_btn.is_visible():
                 is_enabled = await send_btn.is_enabled()
@@ -971,9 +1019,9 @@ class ImageGenerator:
         max_retries = 3
         retry_count = 0
 
-        # Wait minimum time before starting to poll
+        # Wait minimum time before starting to poll (keep-alive prevents idle detection)
         logger.info(f"  ⏳ Initial wait of {min_wait}s before polling...")
-        await asyncio.sleep(min_wait)
+        await self._keep_alive_wait(page, min_wait)
         elapsed = min_wait
 
         while elapsed < timeout:
@@ -1028,13 +1076,16 @@ class ImageGenerator:
                             else:
                                 logger.warning(f"  ⚠️  Re-upload failed for image {idx+1}")
                         logger.info(f"  ✅ Re-uploaded {uploaded_count}/{len(reference_images)} image(s)")
+                    else:
+                        # Re-select image tool (it's lost after page jump-back)
+                        await self._ensure_image_tool(page)
 
                     # Re-submit the prompt
                     await self._submit_prompt(page, prompt, uploaded_count > 0)
                     logger.info("  ✅ Prompt re-submitted after jump-back")
 
                     # Reset polling clock – give generation another full min_wait
-                    await asyncio.sleep(min_wait)
+                    await self._keep_alive_wait(page, min_wait)
                     elapsed += min_wait
                     continue
                 else:
@@ -1127,6 +1178,9 @@ class ImageGenerator:
 
     async def _submit_prompt(self, page: Page, prompt: str, has_image: bool):
         """Enter and submit prompt to Gemini."""
+        # Dismiss any overlay popups that might block input
+        await self._dismiss_overlays(page)
+
         # Build full prompt
         if has_image:
             full_prompt = f"基于上传的参考图片：{prompt}"
@@ -1144,7 +1198,12 @@ class ImageGenerator:
                 elem = await page.wait_for_selector(sel, timeout=5000)
                 if elem:
                     logger.info(f"  ✅ Found input element: {sel}")
-                    await elem.click()
+                    try:
+                        await elem.click(timeout=3000)
+                    except Exception:
+                        # Overlay may still block; use JS focus as fallback
+                        logger.info("  ⚠️  Click blocked, using JS focus...")
+                        await page.evaluate('() => document.querySelector(\'div[contenteditable="true"]\')?.focus()')
                     logger.info("  ⌨️  Typing prompt...")
                     await page.keyboard.type(full_prompt, delay=30)
                     logger.info("  ✅ Prompt typed successfully")
@@ -1161,6 +1220,7 @@ class ImageGenerator:
         logger.info("  🔍 Looking for send button...")
         send_clicked = False
         send_selectors = [
+            'button[aria-label="发送"]',
             'button[aria-label*="send" i]',
             'button[aria-label*="Send" i]',
             'button[type="submit"]',

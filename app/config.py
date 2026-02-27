@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     video_timeout: int = 1800
     proxy: str | None = "http://127.0.0.1:7897"
     use_proxy: bool = True
+    image_engine: str = "http"  # "http" or "playwright"
 
     # Storage Configuration
     storage_dir: Path = Path("./static/generated")

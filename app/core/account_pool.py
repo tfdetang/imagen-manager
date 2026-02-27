@@ -4,11 +4,26 @@ import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from fastapi import HTTPException
 
+from app.config import settings
 from app.core.browser import CookieManager
 from app.core.generator import ImageGenerator
+
+
+class ImageGeneratorEngine(Protocol):
+    """Protocol for image generation engines."""
+
+    async def generate(
+        self,
+        prompt: str,
+        timeout: int = 60,
+        reference_image: Path | None = None,
+        reference_images: list[Path] | None = None,
+    ) -> Path:
+        """Generate one image and return local image path."""
 
 
 @dataclass
@@ -16,7 +31,7 @@ class AccountLease:
     """Leased account runtime context."""
 
     account_id: str
-    generator: ImageGenerator
+    generator: ImageGeneratorEngine
 
 
 @dataclass
@@ -26,7 +41,7 @@ class AccountState:
     account_id: str
     cookies_path: Path
     cookie_manager: CookieManager
-    generator: ImageGenerator
+    generator: ImageGeneratorEngine
     semaphore: asyncio.Semaphore
     active_tasks: int = 0
     cooldown_until: float | None = None
@@ -45,6 +60,7 @@ class AccountPool:
         account_sources: list[tuple[str, Path]],
         proxy: str | None = None,
         per_account_concurrent: int = 1,
+        image_engine: str | None = None,
     ):
         if not account_sources:
             raise ValueError("At least one account source is required")
@@ -54,6 +70,7 @@ class AccountPool:
 
         self._proxy = proxy
         self._per_account_concurrent = per_account_concurrent
+        self._image_engine = (image_engine or settings.image_engine).lower()
         self._accounts: dict[str, AccountState] = {}
         for account_id, cookies_path in account_sources:
             self._accounts[account_id] = self._build_account_state(account_id, cookies_path)
@@ -63,7 +80,16 @@ class AccountPool:
             cookies_path,
             prefer_configured_path=True,
         )
-        generator = ImageGenerator(cookie_manager, self._proxy)
+        if self._image_engine == "http":
+            from app.core.http_generator import HttpImageGenerator
+
+            generator: ImageGeneratorEngine = HttpImageGenerator(cookie_manager, self._proxy)
+        elif self._image_engine == "playwright":
+            generator = ImageGenerator(cookie_manager, self._proxy)
+        else:
+            raise ValueError(
+                f"Invalid image_engine: {self._image_engine}. Supported values: http, playwright"
+            )
         return AccountState(
             account_id=account_id,
             cookies_path=cookies_path,
